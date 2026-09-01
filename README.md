@@ -45,6 +45,32 @@ There are **no Bilibili write operations** in this PoC.
 - Tailscale with Funnel available on the node
 - PowerShell 5.1+ or PowerShell 7
 
+### 依赖安装
+
+运行本项目需要 Python 3.11 或更高版本，以及以下 Python 依赖：
+
+- `mcp>=1.13,<2.0`
+- `httpx>=0.27,<1.0`
+- `starlette>=0.38,<1.0`
+- `uvicorn[standard]>=0.30,<1.0`
+- `python-dotenv>=1.0,<2.0`
+
+推荐使用项目自带的启动脚本。首次启动时，脚本会自动创建 `.venv` 并安装上述依赖：
+
+```powershell
+.\scripts\start.ps1
+```
+
+如需手动安装依赖，可以在仓库根目录执行：
+
+```powershell
+py -3.11 -m venv .venv
+.\.venv\Scripts\python.exe -m pip install --upgrade pip
+.\.venv\Scripts\python.exe -m pip install -e .
+```
+
+如果本机安装的是 Python 3.12、3.13 或更高版本，将上面命令中的 `3.11` 替换为实际版本即可。
+
 ## Quick start
 
 Clone the repository on the always-on Windows machine:
