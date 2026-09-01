@@ -24,7 +24,7 @@ if ($uri.Scheme -ne "https") {
 if ([string]::IsNullOrWhiteSpace($uri.Host)) {
     throw "PublicBaseUrl must include a hostname."
 }
-if (($uri.AbsolutePath -ne "/") -or -not [string]::IsNullOrWhiteSpace($uri.Query) -or -not [string]::IsNullOrWhiteSpace($uri.Fragment)) {
+if (($uri.AbsolutePath -ne "/") -or (-not [string]::IsNullOrWhiteSpace($uri.Query)) -or (-not [string]::IsNullOrWhiteSpace($uri.Fragment))) {
     throw "PublicBaseUrl must be only the HTTPS origin, with no path, query, or fragment."
 }
 
@@ -77,7 +77,8 @@ if ([string]::IsNullOrWhiteSpace($approvalSecret) -or $approvalSecret.Length -lt
     Set-EnvValue "MCP_OAUTH_APPROVAL_SECRET" $approvalSecret
 }
 
-$allowedHosts = @(Get-EnvValue "MCP_ALLOWED_HOSTS" -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+$existingAllowedHosts = Get-EnvValue "MCP_ALLOWED_HOSTS"
+$allowedHosts = @($existingAllowedHosts -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
 if ($allowedHosts -notcontains $uri.Host) {
     $allowedHosts += $uri.Host
 }
