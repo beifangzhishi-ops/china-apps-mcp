@@ -121,8 +121,13 @@ if oauth_provider is not None:
         return await oauth_provider.consent_post(request)
 
     async def _resource_metadata(_: Request) -> JSONResponse:
+        assert auth_settings is not None
         return JSONResponse(
-            oauth_resource_metadata(PUBLIC_MCP_URL, PUBLIC_BASE_URL, OAUTH_SCOPES),
+            oauth_resource_metadata(
+                PUBLIC_MCP_URL,
+                str(auth_settings.issuer_url),
+                OAUTH_SCOPES,
+            ),
             headers={"Cache-Control": "no-store"},
         )
 

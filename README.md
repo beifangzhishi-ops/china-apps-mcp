@@ -164,12 +164,23 @@ The Python process itself still listens only on `127.0.0.1:8765`; no Windows fir
 .\.venv\Scripts\python.exe .\scripts\test-oauth-discovery.py https://cpa-node.tail7c23f0.ts.net/mcp
 ```
 
+在连接 ChatGPT 前，可在本机完整检查授权码、PKCE、token 交换、Bearer 访问和撤销：
+
+```powershell
+.\.venv\Scripts\python.exe .\scripts\test-oauth-flow.py
+```
+
+脚本复用 `.state` 中已经注册的 ChatGPT 客户端；敏感值只提交给本机网关，不会打印授权密钥、客户端 secret 或 token。
+
 A healthy OAuth deployment should show:
 
 - unauthenticated `/mcp` returns `401`;
 - `WWW-Authenticate` is present;
 - OAuth authorization-server metadata is reachable;
 - protected-resource metadata is reachable;
+- protected-resource `authorization_servers` exactly matches the OAuth `issuer`, including the trailing slash;
+- protected-resource `resource` exactly matches the public MCP URL;
+- PKCE `S256` is advertised;
 - `authorization_endpoint`, `token_endpoint`, and `registration_endpoint` are advertised.
 
 ### 6. Switch the ChatGPT plugin to OAuth
