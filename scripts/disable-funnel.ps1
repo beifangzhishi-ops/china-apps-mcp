@@ -14,9 +14,16 @@ if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administra
     throw "Run this script from an elevated PowerShell window."
 }
 
+# Remove only the routes owned by china-apps-mcp. Do not reset Funnel because
+# the same HTTPS listener may also host CPA /v1 or other services.
 & $tailscalePath funnel --https=443 --set-path=/mcp off
 if ($LASTEXITCODE -ne 0) {
-    throw "Failed to disable the /mcp Funnel mapping. Use 'tailscale funnel reset' only if you intend to clear all Funnel routes."
+    throw "Failed to disable the /mcp Funnel mapping."
 }
 
-Write-Output "The public /mcp Funnel route is disabled."
+& $tailscalePath funnel --https=443 --set-path=/ off
+if ($LASTEXITCODE -ne 0) {
+    throw "Failed to disable the root Funnel mapping."
+}
+
+Write-Output "China Apps MCP Funnel routes are disabled. Other path-specific routes were left unchanged."
