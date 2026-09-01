@@ -13,30 +13,94 @@ $logsDir = Join-Path $repoRoot "logs"
 $pidFile = Join-Path $stateDir "mcp.pid"
 $stdoutLog = Join-Path $logsDir "gateway.out.log"
 $stderrLog = Join-Path $logsDir "gateway.err.log"
+$venvDir = Join-Path $repoRoot ".venv"
+$venvPython = Join-Path $venvDir "Scripts\python.exe"
+
+function Test-Python311 {
+    param(
+        [Parameter(Mandatory = $true)][string]$FilePath,
+        [string[]]$PrefixArgs = @()
+    )
+
+    try {
+        & $FilePath @PrefixArgs -c "import sys; raise SystemExit(0 if sys.version_info >= (3, 11) else 1)" 2>$null
+        return ($LASTEXITCODE -eq 0)
+    }
+    catch {
+        return $false
+    }
+}
+
+function New-CompatibleVenv {
+    $py = Get-Command py.exe -ErrorAction SilentlyContinue
+    if ($null -ne $py) {
+        foreach ($selector in @("-3.13", "-3.12", "-3.11")) {
+            if (Test-Python311 -FilePath $py.Source -PrefixArgs @($selector)) {
+                Write-Output "Creating virtual environment with py.exe $selector"
+                & $py.Source $selector -m venv $venvDir
+                if ($LASTEXITCODE -eq 0) { return }
+            }
+        }
+    }
+
+    foreach ($name in @("python3.13.exe", "python3.12.exe", "python3.11.exe", "python.exe")) {
+        $candidate = Get-Command $name -ErrorAction SilentlyContinue
+        if ($null -ne $candidate -and (Test-Python311 -FilePath $candidate.Source)) {
+            Write-Output "Creating virtual environment with $($candidate.Source)"
+            & $candidate.Source -m venv $venvDir
+            if ($LASTEXITCODE -eq 0) { return }
+        }
+    }
+
+    throw "Python 3.11+ was not found. Install Python 3.11, 3.12, or 3.13, then run this script again."
+}
+
+function Normalize-LoopbackProxy {
+    foreach ($name in @("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY")) {
+        $value = [Environment]::GetEnvironmentVariable($name, "Process")
+        if ([string]::IsNullOrWhiteSpace($value)) { continue }
+
+        if ($value -match '^https://(127\.0\.0\.1|localhost|\[::1\])(?=[:/])') {
+            $normalized = "http://" + $value.Substring(8)
+            [Environment]::SetEnvironmentVariable($name, $normalized, "Process")
+            Write-Output "Normalized $name from HTTPS loopback proxy to HTTP loopback proxy for this process."
+        }
+    }
+}
 
 if (-not (Test-Path -LiteralPath ".env")) {
     & (Join-Path $PSScriptRoot "init-env.ps1")
 }
 
-$venvPython = Join-Path $repoRoot ".venv\Scripts\python.exe"
-if (-not (Test-Path -LiteralPath $venvPython)) {
-    if (Get-Command py.exe -ErrorAction SilentlyContinue) {
-        & py.exe -3 -m venv .venv
+Normalize-LoopbackProxy
+
+if (Test-Path -LiteralPath $venvPython) {
+    if (-not (Test-Python311 -FilePath $venvPython)) {
+        Write-Output "Existing .venv uses Python older than 3.11. Recreating it."
+        Remove-Item -LiteralPath $venvDir -Recurse -Force
     }
-    elseif (Get-Command python.exe -ErrorAction SilentlyContinue) {
-        & python.exe -m venv .venv
-    }
-    else {
-        throw "Python 3.11+ was not found."
-    }
-    if ($LASTEXITCODE -ne 0) { throw "Failed to create virtual environment." }
 }
 
+if (-not (Test-Path -LiteralPath $venvPython)) {
+    New-CompatibleVenv
+}
+
+if (-not (Test-Python311 -FilePath $venvPython)) {
+    throw "Virtual environment Python is not 3.11+. Remove .venv and install Python 3.11+."
+}
+
+$pythonVersion = (& $venvPython -c "import sys; print('.'.join(map(str, sys.version_info[:3])))").Trim()
+Write-Output "Using Python $pythonVersion"
+
 if (-not $SkipInstall) {
-    & $venvPython -m pip install --upgrade pip
-    if ($LASTEXITCODE -ne 0) { throw "pip upgrade failed." }
-    & $venvPython -m pip install -e .
-    if ($LASTEXITCODE -ne 0) { throw "Dependency installation failed." }
+    # Do not force a pip self-upgrade on every start. The venv-bundled pip is
+    # sufficient to install this project and avoids an unnecessary network step.
+    & $venvPython -m pip install --disable-pip-version-check -e .
+    if ($LASTEXITCODE -ne 0) {
+        Write-Output "Dependency installation failed."
+        Write-Output "If FlClash is used as a local HTTP proxy, use http://127.0.0.1:<port>, not https://127.0.0.1:<port>."
+        throw "Dependency installation failed."
+    }
 }
 
 if (-not $Background) {
