@@ -5,7 +5,6 @@ $ErrorActionPreference = "Stop"
 $repoRoot = Split-Path -Parent $PSScriptRoot
 $stateDir = Join-Path $repoRoot ".state"
 $pidFile = Join-Path $stateDir "mcp.pid"
-$expectedPython = [IO.Path]::GetFullPath((Join-Path $repoRoot ".venv\Scripts\python.exe"))
 
 if (-not (Test-Path -LiteralPath $pidFile)) {
     Write-Output "China Apps MCP is not running (PID file not found)."
@@ -26,17 +25,8 @@ if ($null -eq $process) {
 }
 
 $cim = Get-CimInstance Win32_Process -Filter "ProcessId = $targetPid" -ErrorAction SilentlyContinue
-if ($null -ne $cim) {
-    if ($cim.ExecutablePath) {
-        $actualPython = [IO.Path]::GetFullPath($cim.ExecutablePath)
-        if (-not [string]::Equals($actualPython, $expectedPython, [StringComparison]::OrdinalIgnoreCase)) {
-            throw "Refusing to stop PID $targetPid because it is not the repository virtualenv Python."
-        }
-    }
-
-    if ($cim.CommandLine -and $cim.CommandLine -notmatch "china_apps_mcp") {
-        throw "Refusing to stop PID $targetPid because its command line does not contain china_apps_mcp."
-    }
+if ($null -ne $cim -and $cim.CommandLine -and $cim.CommandLine -notmatch "china_apps_mcp") {
+    throw "Refusing to stop PID $targetPid because its command line does not contain china_apps_mcp."
 }
 
 Stop-Process -Id $targetPid -Force
