@@ -16,6 +16,7 @@ from mcp.server.auth.provider import (
     AuthorizationParams,
     OAuthAuthorizationServerProvider,
     RefreshToken,
+    TokenError,
     construct_redirect_uri,
 )
 from mcp.shared.auth import OAuthClientInformationFull, OAuthToken
@@ -81,7 +82,7 @@ class LocalOAuthProvider(
                 for item in raw.get("refresh_tokens", [])
                 if item.get("expires_at") is None or int(item["expires_at"]) > now
             }
-        except Exception as exc:  # fail closed instead of silently losing auth state
+        except Exception as exc:
             raise RuntimeError(f"Failed to load OAuth state from {self.state_file}: {exc}") from exc
 
     def _save_state(self) -> None:
@@ -175,7 +176,7 @@ class LocalOAuthProvider(
     ) -> OAuthToken:
         current = self.codes.pop(authorization_code.code, None)
         if current is None or current.client_id != client.client_id:
-            raise ValueError("authorization code is invalid or already used")
+            raise TokenError("invalid_grant", "authorization code is invalid or already used")
         return self._mint_token_pair(
             client_id=current.client_id,
             scopes=current.scopes,
@@ -214,10 +215,11 @@ class LocalOAuthProvider(
     ) -> OAuthToken:
         current = self.refresh_tokens.pop(refresh_token.token, None)
         if current is None or current.client_id != client.client_id:
-            raise ValueError("refresh token is invalid or already used")
+            raise TokenError("invalid_grant", "refresh token is invalid or already used")
         requested = scopes or current.scopes
         if not set(requested).issubset(set(current.scopes)):
-            raise ValueError("requested scope exceeds the original grant")
+            self.refresh_tokens[current.token] = current
+            raise TokenError("invalid_scope", "requested scope exceeds the original grant")
         return self._mint_token_pair(
             client_id=current.client_id,
             scopes=requested,
