@@ -34,7 +34,7 @@ function Test-Python311 {
 function New-CompatibleVenv {
     $py = Get-Command py.exe -ErrorAction SilentlyContinue
     if ($null -ne $py) {
-        foreach ($selector in @("-3.13", "-3.12", "-3.11")) {
+        foreach ($selector in @("-3.14", "-3.13", "-3.12", "-3.11", "-3")) {
             if (Test-Python311 -FilePath $py.Source -PrefixArgs @($selector)) {
                 Write-Output "Creating virtual environment with py.exe $selector"
                 & $py.Source $selector -m venv $venvDir
@@ -43,7 +43,7 @@ function New-CompatibleVenv {
         }
     }
 
-    foreach ($name in @("python3.13.exe", "python3.12.exe", "python3.11.exe", "python.exe")) {
+    foreach ($name in @("python3.14.exe", "python3.13.exe", "python3.12.exe", "python3.11.exe", "python.exe")) {
         $candidate = Get-Command $name -ErrorAction SilentlyContinue
         if ($null -ne $candidate -and (Test-Python311 -FilePath $candidate.Source)) {
             Write-Output "Creating virtual environment with $($candidate.Source)"
@@ -52,7 +52,7 @@ function New-CompatibleVenv {
         }
     }
 
-    throw "Python 3.11+ was not found. Install Python 3.11, 3.12, or 3.13, then run this script again."
+    throw "Python 3.11+ was not found. Install Python 3.11, 3.12, 3.13, or 3.14, then run this script again."
 }
 
 function Normalize-LoopbackProxy {
