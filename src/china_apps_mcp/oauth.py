@@ -305,7 +305,12 @@ button{{padding:10px 16px;margin-right:8px}} .error{{color:#b00020}} code{{word-
                 headers={"Cache-Control": "no-store"},
             )
 
-        if not hmac.compare_digest(secret, self.approval_secret):
+        # compare_digest() only accepts ASCII strings. Comparing UTF-8 bytes keeps
+        # the constant-time comparison behavior while treating accidental Unicode
+        # input as a normal mismatch instead of crashing the OAuth callback.
+        secret_bytes = secret.encode("utf-8")
+        expected_bytes = self.approval_secret.encode("utf-8")
+        if not hmac.compare_digest(secret_bytes, expected_bytes):
             pending.failed_attempts += 1
             if pending.failed_attempts >= 5:
                 self.pending.pop(request_id, None)
