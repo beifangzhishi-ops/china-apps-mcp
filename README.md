@@ -99,6 +99,12 @@ The helper updates only the local ignored `.env` and:
 - creates a random `MCP_OAUTH_APPROVAL_SECRET` if one is missing;
 - keeps OAuth clients/tokens in `.state/oauth-state.json` so authorization survives normal restarts.
 
+如果本机授权密钥曾经泄露，使用下面的命令轮换密钥；命令不会打印密钥，也不会删除 OAuth 状态：
+
+```powershell
+.\scripts\enable-oauth.ps1 -PublicBaseUrl https://cpa-node.tail7c23f0.ts.net -RotateSecret
+```
+
 Do **not** paste `MCP_OAUTH_APPROVAL_SECRET`, `MCP_ACCESS_TOKEN`, OAuth tokens, or platform cookies into chat.
 
 ### 3. Restart the gateway

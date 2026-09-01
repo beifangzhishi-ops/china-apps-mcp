@@ -1,6 +1,7 @@
 [CmdletBinding()]
 param(
-    [Parameter(Mandatory = $true)][string]$PublicBaseUrl
+    [Parameter(Mandatory = $true)][string]$PublicBaseUrl,
+    [switch]$RotateSecret
 )
 
 $ErrorActionPreference = "Stop"
@@ -72,7 +73,7 @@ function New-RandomSecret {
 }
 
 $approvalSecret = Get-EnvValue "MCP_OAUTH_APPROVAL_SECRET"
-if ([string]::IsNullOrWhiteSpace($approvalSecret) -or $approvalSecret.Length -lt 16) {
+if ($RotateSecret -or [string]::IsNullOrWhiteSpace($approvalSecret) -or $approvalSecret.Length -lt 16) {
     $approvalSecret = New-RandomSecret
     Set-EnvValue "MCP_OAUTH_APPROVAL_SECRET" $approvalSecret
 }
