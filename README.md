@@ -157,6 +157,26 @@ The MCP endpoint is:
 http://127.0.0.1:8765/mcp
 ```
 
+### Funnel Host 白名单
+
+MCP 服务默认启用 DNS rebinding 防护，只允许本机 Host。通过 Tailscale Funnel 暴露时，需要在本机 `.env` 中加入实际 Funnel 域名（只填域名，不要加协议或路径）：
+
+```text
+MCP_ALLOWED_HOSTS=cpa-node.tail7c23f0.ts.net
+```
+
+如果客户端同时发送了 `Origin` 请求头，再按需设置 `MCP_ALLOWED_ORIGINS`。不要使用 `*` 放开全部 Host 或 Origin。
+
+### 公网 MCP 握手测试
+
+配置 Funnel 后，可以使用仓库中的测试客户端验证公网 HTTPS、Bearer 认证和 MCP 协议握手：
+
+```powershell
+.\.venv\Scripts\python.exe .\scripts\test-remote.py https://your-tailscale-domain.example/mcp
+```
+
+测试客户端会从本机 `.env` 读取 `MCP_ACCESS_TOKEN`，不会打印 Token。成功时会依次执行 `initialize`、`tools/list` 和 `tools/call gateway_ping`。
+
 ## Expose only `/mcp` with Tailscale Funnel
 
 Run an elevated PowerShell after the local health check succeeds:

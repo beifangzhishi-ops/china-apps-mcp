@@ -8,6 +8,7 @@ from typing import Any
 import uvicorn
 from dotenv import load_dotenv
 from mcp.server.fastmcp import FastMCP
+from mcp.server.transport_security import TransportSecuritySettings
 from starlette.applications import Starlette
 from starlette.responses import JSONResponse
 from starlette.routing import Mount, Route
@@ -21,10 +22,29 @@ HOST = os.getenv("MCP_HOST", "127.0.0.1")
 PORT = int(os.getenv("MCP_PORT", "8765"))
 ACCESS_TOKEN = os.getenv("MCP_ACCESS_TOKEN", "").strip()
 
+
+def _csv_env(name: str) -> list[str]:
+    return [item.strip() for item in os.getenv(name, "").split(",") if item.strip()]
+
+
+_allowed_hosts = ["127.0.0.1:*", "localhost:*", "[::1]:*"]
+for _host in _csv_env("MCP_ALLOWED_HOSTS"):
+    _allowed_hosts.append(_host)
+    if not _host.endswith(":*"):
+        _allowed_hosts.append(f"{_host}:*")
+
+_allowed_origins = ["http://127.0.0.1:*", "http://localhost:*", "http://[::1]:*"]
+_allowed_origins.extend(_csv_env("MCP_ALLOWED_ORIGINS"))
+
 mcp = FastMCP(
     "China Apps MCP Gateway",
     stateless_http=True,
     json_response=True,
+    transport_security=TransportSecuritySettings(
+        enable_dns_rebinding_protection=True,
+        allowed_hosts=_allowed_hosts,
+        allowed_origins=_allowed_origins,
+    ),
 )
 
 
