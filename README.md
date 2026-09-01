@@ -54,7 +54,34 @@ git clone https://github.com/beifangzhishi-ops/china-apps-mcp.git
 cd china-apps-mcp
 ```
 
-Initialize local secrets:
+### Windows one-click start/stop
+
+After cloning, the repository root contains:
+
+```text
+启动MCP.cmd
+停止MCP.cmd
+```
+
+Double-click `启动MCP.cmd` to initialize the local environment when needed, start the gateway in a hidden background process, wait for `/health`, and then close the command window automatically.
+
+Double-click `停止MCP.cmd` to stop only the gateway process recorded in `.state/mcp.pid`.
+
+Runtime files are local-only and ignored by Git:
+
+```text
+.state/mcp.pid
+logs/gateway.out.log
+logs/gateway.err.log
+```
+
+If startup fails, the command window remains open so the error can be read. Detailed Python output is in `logs/gateway.err.log`.
+
+Encoding rule for the Windows launchers: the `.cmd` file bodies are intentionally ASCII-only, which is also valid UTF-8 without BOM. Do not add a UTF-8 BOM to the `.cmd` files. The PowerShell startup/stop scripts are also currently ASCII-only, so Windows PowerShell 5.1 does not depend on BOM-based UTF-8 detection.
+
+### Manual/debug start
+
+Initialize local secrets manually if desired:
 
 ```powershell
 .\scripts\init-env.ps1
@@ -66,6 +93,18 @@ Start the gateway in the foreground for initial debugging:
 
 ```powershell
 .\scripts\start.ps1
+```
+
+Or start it in the same background mode used by `启动MCP.cmd`:
+
+```powershell
+.\scripts\start.ps1 -Background
+```
+
+Stop the background instance:
+
+```powershell
+.\scripts\stop.ps1
 ```
 
 Check local health from another terminal:
@@ -157,9 +196,12 @@ For a short **network-only** test with auth disabled, leave `BILIBILI_COOKIE` em
 ├─ scripts/
 │  ├─ init-env.ps1
 │  ├─ start.ps1
+│  ├─ stop.ps1
 │  ├─ status.ps1
 │  ├─ configure-funnel.ps1
 │  └─ disable-funnel.ps1
+├─ 启动MCP.cmd
+├─ 停止MCP.cmd
 ├─ .env.example
 ├─ .gitignore
 ├─ pyproject.toml
