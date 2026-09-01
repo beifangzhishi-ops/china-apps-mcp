@@ -1,15 +1,15 @@
 # China Apps MCP Gateway
 
-A personal **Streamable HTTP MCP gateway** for exposing local China-app integrations to remote AI clients without opening Windows service ports directly to the Internet.
+A personal **Streamable HTTP MCP gateway** for exposing local China-app integrations to ChatGPT through Tailscale Funnel while the Python service stays bound to `127.0.0.1`.
 
-The first PoC is intentionally small: prove the path **ChatGPT/remote client -> HTTPS -> Tailscale Funnel -> localhost MCP**, then add platform adapters one by one.
+## Current status
 
-## Current architecture
+The end-to-end path is working:
 
 ```text
-Remote MCP client
+ChatGPT Custom MCP
       |
-      | HTTPS /mcp
+      | HTTPS + MCP
       v
 Tailscale Funnel
       |
@@ -20,120 +20,95 @@ Tailscale Funnel
 China Apps MCP Gateway
       |
       +-- gateway_ping
-      +-- Bilibili (read-only PoC)
+      +-- Bilibili public/read-only PoC
       +-- Zhihu       [planned]
       +-- Douyin      [planned]
       +-- QQ / OneBot [planned]
       +-- WeChat      [planned]
 ```
 
-The Python service refuses non-loopback `MCP_HOST` values. Tailscale provides the public HTTPS edge.
+The gateway supports three authentication modes:
 
-## v0.1 tools
+```text
+MCP_AUTH_MODE=none   # temporary network PoC only
+MCP_AUTH_MODE=token  # static Bearer token for scripts/debugging
+MCP_AUTH_MODE=oauth  # recommended for ChatGPT Custom MCP
+```
 
-- `gateway_ping` - verifies MCP tool connectivity.
-- `bilibili_get_video(bvid)` - reads public video metadata; no login required.
+OAuth mode uses Authorization Code + PKCE (S256), Dynamic Client Registration, refresh tokens, protected-resource metadata, and a local human approval secret.
+
+## Current tools
+
+- `gateway_ping` - verifies MCP connectivity and reports the active auth mode.
+- `bilibili_get_video(bvid)` - reads public Bilibili video metadata.
 - `bilibili_account_status()` - reports only whether a local Bilibili cookie is configured.
 - `bilibili_get_my_profile()` - reads the current account profile when `BILIBILI_COOKIE` is configured locally.
 
-There are **no Bilibili write operations** in this PoC.
+There are currently **no Bilibili write operations**.
 
 ## Requirements
 
 - Windows 10/11
 - Python 3.11+
-- Tailscale with Funnel available on the node
+- Tailscale with Funnel available
 - PowerShell 5.1+ or PowerShell 7
 
-### 依赖安装
-
-运行本项目需要 Python 3.11 或更高版本，以及以下 Python 依赖：
-
-- `mcp>=1.13,<2.0`
-- `httpx>=0.27,<1.0`
-- `starlette>=0.38,<1.0`
-- `uvicorn[standard]>=0.30,<1.0`
-- `python-dotenv>=1.0,<2.0`
-
-推荐使用项目自带的启动脚本。首次启动时，脚本会自动创建 `.venv` 并安装上述依赖：
-
-```powershell
-.\scripts\start.ps1
-```
-
-如需手动安装依赖，可以在仓库根目录执行：
-
-```powershell
-py -3.11 -m venv .venv
-.\.venv\Scripts\python.exe -m pip install --upgrade pip
-.\.venv\Scripts\python.exe -m pip install -e .
-```
-
-如果本机安装的是 Python 3.12、3.13 或更高版本，将上面命令中的 `3.11` 替换为实际版本即可。
+Python dependencies are installed automatically by the launcher from `pyproject.toml`.
 
 ## Quick start
-
-Clone the repository on the always-on Windows machine:
 
 ```powershell
 git clone https://github.com/beifangzhishi-ops/china-apps-mcp.git
 cd china-apps-mcp
 ```
 
-### Windows one-click start/stop
-
-After cloning, the repository root contains:
+The repository root contains:
 
 ```text
 启动MCP.cmd
 停止MCP.cmd
 ```
 
-Double-click `启动MCP.cmd` to initialize the local environment when needed, start the gateway in a hidden background process, wait for `/health`, and then close the command window automatically.
+Double-click `启动MCP.cmd` to create/update `.venv`, install the project, start it in the background, and wait for `/health`.
 
-Double-click `停止MCP.cmd` to stop only the gateway process recorded in `.state/mcp.pid`.
+Double-click `停止MCP.cmd` to stop only the process recorded in `.state/mcp.pid`.
 
-Runtime files are local-only and ignored by Git:
+The `.cmd` bodies are intentionally ASCII-only and should remain UTF-8 **without BOM**. The PowerShell launcher scripts are also kept ASCII-only where practical for Windows PowerShell 5.1 compatibility.
+
+## OAuth setup for ChatGPT
+
+### 1. Pull the latest code
+
+```powershell
+git pull
+```
+
+### 2. Enable OAuth locally
+
+For the current Funnel host:
+
+```powershell
+.\scripts\enable-oauth.ps1 -PublicBaseUrl https://cpa-node.tail7c23f0.ts.net
+```
+
+The helper updates only the local ignored `.env` and:
+
+- sets `MCP_AUTH_MODE=oauth`;
+- sets `MCP_PUBLIC_BASE_URL`;
+- adds the Funnel hostname to `MCP_ALLOWED_HOSTS`;
+- creates a random `MCP_OAUTH_APPROVAL_SECRET` if one is missing;
+- keeps OAuth clients/tokens in `.state/oauth-state.json` so authorization survives normal restarts.
+
+Do **not** paste `MCP_OAUTH_APPROVAL_SECRET`, `MCP_ACCESS_TOKEN`, OAuth tokens, or platform cookies into chat.
+
+### 3. Restart the gateway
 
 ```text
-.state/mcp.pid
-logs/gateway.out.log
-logs/gateway.err.log
+停止MCP.cmd
+启动MCP.cmd
 ```
 
-If startup fails, the command window remains open so the error can be read. Detailed Python output is in `logs/gateway.err.log`.
-
-Encoding rule for the Windows launchers: the `.cmd` file bodies are intentionally ASCII-only, which is also valid UTF-8 without BOM. Do not add a UTF-8 BOM to the `.cmd` files. The PowerShell startup/stop scripts are also currently ASCII-only, so Windows PowerShell 5.1 does not depend on BOM-based UTF-8 detection.
-
-### Manual/debug start
-
-Initialize local secrets manually if desired:
-
-```powershell
-.\scripts\init-env.ps1
-```
-
-This creates an ignored `.env` containing a random `MCP_ACCESS_TOKEN`. Do not commit or paste that token into chat.
-
-Start the gateway in the foreground for initial debugging:
-
-```powershell
-.\scripts\start.ps1
-```
-
-Or start it in the same background mode used by `启动MCP.cmd`:
-
-```powershell
-.\scripts\start.ps1 -Background
-```
-
-Stop the background instance:
-
-```powershell
-.\scripts\stop.ps1
-```
-
-Check local health from another terminal:
+Check local status:
 
 ```powershell
 Invoke-RestMethod http://127.0.0.1:8765/health
@@ -147,89 +122,139 @@ Expected shape:
   "service": "china-apps-mcp",
   "version": "0.1.0",
   "mcp_path": "/mcp",
+  "auth_mode": "oauth",
   "auth_enabled": true
 }
 ```
 
-The MCP endpoint is:
+### 4. Expose MCP + OAuth routes through Funnel
 
-```text
-http://127.0.0.1:8765/mcp
-```
-
-### Funnel Host 白名单
-
-MCP 服务默认启用 DNS rebinding 防护，只允许本机 Host。通过 Tailscale Funnel 暴露时，需要在本机 `.env` 中加入实际 Funnel 域名（只填域名，不要加协议或路径）：
-
-```text
-MCP_ALLOWED_HOSTS=cpa-node.tail7c23f0.ts.net
-```
-
-如果客户端同时发送了 `Origin` 请求头，再按需设置 `MCP_ALLOWED_ORIGINS`。不要使用 `*` 放开全部 Host 或 Origin。
-
-### 公网 MCP 握手测试
-
-配置 Funnel 后，可以使用仓库中的测试客户端验证公网 HTTPS、Bearer 认证和 MCP 协议握手：
-
-```powershell
-.\.venv\Scripts\python.exe .\scripts\test-remote.py https://your-tailscale-domain.example/mcp
-```
-
-测试客户端会从本机 `.env` 读取 `MCP_ACCESS_TOKEN`，不会打印 Token。成功时会依次执行 `initialize`、`tools/list` 和 `tools/call gateway_ping`。
-
-## Expose only `/mcp` with Tailscale Funnel
-
-Run an elevated PowerShell after the local health check succeeds:
+Run an elevated PowerShell:
 
 ```powershell
 .\scripts\configure-funnel.ps1
 ```
 
-The script maps only the `/mcp` public path to:
+The script keeps an explicit `/mcp` route and also adds a root fallback for the OAuth endpoints on the same HTTPS origin. More-specific existing Funnel routes such as CPA `/v1` remain more specific than the root fallback.
+
+OAuth needs these public routes:
 
 ```text
-http://127.0.0.1:8765/mcp
+/.well-known/oauth-authorization-server
+/.well-known/oauth-protected-resource
+/authorize
+/token
+/register
+/revoke
+/oauth/consent
+/mcp
 ```
 
-It does not open TCP 8765 in Windows Firewall.
+The Python process itself still listens only on `127.0.0.1:8765`; no Windows firewall port needs to be opened.
 
-Check status:
+### 5. Smoke-test OAuth discovery
 
 ```powershell
-.\scripts\status.ps1
+.\.venv\Scripts\python.exe .\scripts\test-oauth-discovery.py https://cpa-node.tail7c23f0.ts.net/mcp
 ```
 
-Disable the public MCP route:
+A healthy OAuth deployment should show:
 
-```powershell
-.\scripts\disable-funnel.ps1
+- unauthenticated `/mcp` returns `401`;
+- `WWW-Authenticate` is present;
+- OAuth authorization-server metadata is reachable;
+- protected-resource metadata is reachable;
+- `authorization_endpoint`, `token_endpoint`, and `registration_endpoint` are advertised.
+
+### 6. Switch the ChatGPT plugin to OAuth
+
+In ChatGPT developer mode, edit/recreate the Custom MCP with:
+
+```text
+Name: China Apps MCP
+Server URL: https://cpa-node.tail7c23f0.ts.net/mcp
+Authentication: OAuth
 ```
 
-The Funnel mapping follows the same pattern as the existing CPA deployment, but uses a separate path and separate authentication secret.
+ChatGPT should discover the OAuth endpoints and open the gateway approval page in the browser. Copy `MCP_OAUTH_APPROVAL_SECRET` from your **local `.env` file** into that browser page. The secret is for the human approval page only; it is never sent as an MCP tool argument.
 
-## Bilibili account PoC
+After approval, test:
 
-Public video metadata works with no account credentials.
+```text
+@China Apps MCP call gateway_ping
+```
 
-For `bilibili_get_my_profile`, set `BILIBILI_COOKIE` only in the local `.env` file. The cookie is never returned by the MCP tools and `.env` is ignored by Git.
+The result should report:
 
-Do **not** send Bilibili cookies, `SESSDATA`, QR-login state, or browser profile files through chat.
+```json
+{
+  "auth_mode": "oauth",
+  "auth_enabled": true
+}
+```
 
-The account integration is deliberately read-only until the gateway authentication and confirmation model is proven end to end.
+## Static token mode
 
-## Authentication
+For scripts or local debugging, set:
 
-`/mcp` supports an optional static bearer token using:
+```text
+MCP_AUTH_MODE=token
+MCP_ACCESS_TOKEN=<high-entropy-secret>
+```
+
+Then `/mcp` accepts:
 
 ```text
 Authorization: Bearer <MCP_ACCESS_TOKEN>
 ```
 
-`/health` stays local and does not require the token. The Funnel script exposes `/mcp`, not `/health`.
+The old remote smoke test remains available:
 
-Important: ChatGPT Custom App authentication support can differ by product version/plan. If the ChatGPT configuration available to you requires OAuth instead of a static bearer token, the next step is to add an OAuth-compatible front end. Do not solve that by permanently exposing account-enabled MCP tools without authentication.
+```powershell
+.\.venv\Scripts\python.exe .\scripts\test-remote.py https://cpa-node.tail7c23f0.ts.net/mcp
+```
 
-For a short **network-only** test with auth disabled, leave `BILIBILI_COOKIE` empty and remove/comment `MCP_ACCESS_TOKEN`, test only `gateway_ping` / public Bilibili metadata, then disable Funnel again.
+## No-auth mode
+
+`MCP_AUTH_MODE=none` exists only for connectivity testing. Do not use it after adding account cookies or write tools.
+
+## Bilibili account PoC
+
+Public video metadata works without account credentials.
+
+Only after OAuth is verified end-to-end should `BILIBILI_COOKIE` be set locally for `bilibili_get_my_profile`. The cookie is never returned by the tools and `.env` is ignored by Git.
+
+Do **not** send Bilibili cookies, `SESSDATA`, QR-login state, browser profiles, or OAuth secrets through chat.
+
+## Runtime and secret files
+
+These are ignored by Git:
+
+```text
+.env
+.state/mcp.pid
+.state/oauth-state.json
+logs/gateway.out.log
+logs/gateway.err.log
+cookies/
+profiles/
+```
+
+## Funnel management
+
+Check:
+
+```powershell
+.\scripts\status.ps1
+```
+
+Disable only the China Apps MCP Funnel routes:
+
+```powershell
+.\scripts\disable-funnel.ps1
+```
+
+The disable script intentionally avoids `tailscale funnel reset` so unrelated routes such as CPA `/v1` are not cleared.
 
 ## Repository layout
 
@@ -237,15 +262,19 @@ For a short **network-only** test with auth disabled, leave `BILIBILI_COOKIE` em
 .
 ├─ src/china_apps_mcp/
 │  ├─ server.py
+│  ├─ oauth.py
 │  └─ adapters/
 │     └─ bilibili.py
 ├─ scripts/
 │  ├─ init-env.ps1
+│  ├─ enable-oauth.ps1
 │  ├─ start.ps1
 │  ├─ stop.ps1
 │  ├─ status.ps1
 │  ├─ configure-funnel.ps1
-│  └─ disable-funnel.ps1
+│  ├─ disable-funnel.ps1
+│  ├─ test-remote.py
+│  └─ test-oauth-discovery.py
 ├─ 启动MCP.cmd
 ├─ 停止MCP.cmd
 ├─ .env.example
@@ -256,12 +285,10 @@ For a short **network-only** test with auth disabled, leave `BILIBILI_COOKIE` em
 
 ## Next milestones
 
-1. Run the local MCP and verify `gateway_ping` with an MCP inspector/client.
-2. Verify Tailscale Funnel preserves Streamable HTTP behavior.
-3. Connect the remote MCP URL to ChatGPT Custom Apps and determine the available auth method.
-4. Add OAuth if required before enabling account credentials.
-5. Add a Bilibili login/cookie adapter with least-privilege read tools.
-6. Add upstream MCP bridging for Zhihu, Douyin, QQ/OneBot, and WeChat.
-7. Add per-platform read/write scopes and explicit confirmation for write operations.
+1. Verify ChatGPT OAuth login end-to-end.
+2. Enable the Bilibili account cookie only after OAuth is confirmed.
+3. Add Bilibili search, subtitles, favorites, history, and comments as read-only tools first.
+4. Add separate write scopes and explicit confirmation before any like/comment/publish/message operation.
+5. Add Zhihu, Douyin, QQ/OneBot, and WeChat adapters behind the same gateway.
 
-See [SECURITY.md](SECURITY.md) before adding any account or write capability.
+See [SECURITY.md](SECURITY.md) before adding account or write capabilities.
