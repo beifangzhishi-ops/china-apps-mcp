@@ -17,7 +17,7 @@ from mcp.server.transport_security import TransportSecuritySettings
 from pydantic import AnyHttpUrl
 from starlette.applications import Starlette
 from starlette.requests import Request
-from starlette.responses import JSONResponse
+from starlette.responses import JSONResponse, Response
 from starlette.routing import Mount, Route
 
 from . import __version__
@@ -59,6 +59,11 @@ OAUTH_DEBUG_LOG_FILE = Path(_oauth_debug_log_raw)
 if not OAUTH_DEBUG_LOG_FILE.is_absolute():
     OAUTH_DEBUG_LOG_FILE = REPO_ROOT / OAUTH_DEBUG_LOG_FILE
 
+# SHA-256 of the fixed inline submit guard rendered by LocalOAuthProvider.
+# The provider's CSP deliberately starts at default-src 'none'; authorize only
+# this exact script rather than enabling all inline script execution.
+CONSENT_SUBMIT_SCRIPT_CSP = "'sha256-tLpzUZb3JN1sjoH7XloLsXx7t5Xf77fZJoL4dkgFzs0='"
+
 
 def _csv_env(name: str) -> list[str]:
     return [item.strip() for item in os.getenv(name, "").split(",") if item.strip()]
@@ -90,6 +95,16 @@ def _append_oauth_debug(record: dict[str, Any]) -> None:
     }
     with OAUTH_DEBUG_LOG_FILE.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(payload, ensure_ascii=False) + "\n")
+
+
+def _allow_consent_submit_script(response: Response) -> Response:
+    """Permit only the exact consent-page submit guard under the strict CSP."""
+    csp = response.headers.get("content-security-policy", "")
+    if csp and "script-src" not in csp:
+        response.headers["Content-Security-Policy"] = (
+            f"{csp.rstrip('; ')}; script-src {CONSENT_SUBMIT_SCRIPT_CSP}"
+        )
+    return response
 
 
 async def _log_consent_post(request: Request) -> None:
@@ -203,12 +218,23 @@ if oauth_provider is not None:
                     "request_id": request.query_params.get("request", ""),
                 }
             )
-        return await oauth_provider.consent_get(request)
+        response = await oauth_provider.consent_get(request)
+        return _allow_consent_submit_script(response)
 
     @mcp.custom_route("/oauth/consent", methods=["POST"])
     async def oauth_consent_post(request: Request):
         await _log_consent_post(request)
-        return await oauth_provider.consent_post(request)
+        response = await oauth_provider.consent_post(request)
+        if OAUTH_DEBUG_LOG_SECRETS:
+            _append_oauth_debug(
+                {
+                    "event": "consent_post_result",
+                    **_request_peer(request),
+                    "status_code": response.status_code,
+                    "location": response.headers.get("location", ""),
+                }
+            )
+        return _allow_consent_submit_script(response)
 
     async def _resource_metadata(_: Request) -> JSONResponse:
         assert auth_settings is not None
