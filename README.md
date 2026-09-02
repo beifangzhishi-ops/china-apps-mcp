@@ -1,59 +1,61 @@
 # China Apps MCP Gateway
 
-A personal **Streamable HTTP MCP gateway** for exposing local China-app integrations to ChatGPT through Tailscale Funnel while the Python service stays bound to `127.0.0.1`.
+A personal Streamable HTTP MCP gateway for exposing read-only China-app integrations to ChatGPT while the Python service stays on a Windows machine.
 
-## Current status
-
-The end-to-end path is working:
+## Architecture
 
 ```text
-ChatGPT Custom MCP
-      |
-      | HTTPS + MCP
-      v
+ChatGPT Web
+    |
+    | HTTPS + MCP
+    v
 Tailscale Funnel
-      |
-      v
-127.0.0.1:8765/mcp
-      |
-      v
-China Apps MCP Gateway
-      |
-      +-- gateway_ping
-      +-- Bilibili public/read-only PoC
-      +-- Zhihu       [planned]
-      +-- Douyin      [planned]
-      +-- QQ / OneBot [planned]
-      +-- WeChat      [planned]
+    |
+    v
+127.0.0.1:8765  China Apps MCP
+    |
+    +-- Bilibili adapter
+    |
+    +-- browser_* tools
+            |
+            | local WebSocket only
+            v
+       127.0.0.1:8766
+            |
+            v
+  China Apps Browser Bridge
+        Edge extension
+            |
+            v
+  normal Microsoft Edge tabs
 ```
 
-The gateway supports three authentication modes:
+Version 0.3 uses a normal Microsoft Edge session. The MCP no longer launches Chrome/Edge, no longer uses Playwright/CDP, does not require `--remote-debugging-port`, and does not maintain a separate browser profile.
 
-```text
-MCP_AUTH_MODE=none   # temporary network PoC only
-MCP_AUTH_MODE=token  # static Bearer token for scripts/debugging
-MCP_AUTH_MODE=oauth  # recommended for ChatGPT Custom MCP
-```
+You open Edge normally from the desktop/taskbar and sign in to websites yourself. The unpacked extension reads approved pages from that existing session.
 
-OAuth mode uses Authorization Code + PKCE (S256), Dynamic Client Registration, refresh tokens, protected-resource metadata, and a local human approval secret.
+## Current MCP tools
 
-## Current tools
+- `gateway_ping()`
+- `bilibili_get_video(bvid)`
+- `bilibili_account_status()`
+- `bilibili_get_my_profile()`
+- `browser_status()`
+- `browser_start()` - compatibility/status check; it does not launch Edge
+- `browser_open(url)`
+- `browser_read_page(url="", tab_id=0, max_chars=30000)`
+- `browser_list_pages()`
+- `browser_stop()` - compatibility no-op; Edge remains user-owned
 
-- `gateway_ping` - verifies MCP connectivity and reports the active auth mode.
-- `bilibili_get_video(bvid)` - reads public Bilibili video metadata.
-- `bilibili_account_status()` - reports only whether a local Bilibili cookie is configured.
-- `bilibili_get_my_profile()` - reads the current account profile when `BILIBILI_COOKIE` is configured locally.
-
-There are currently **no Bilibili write operations**.
+Browser tools are read-oriented. There is no generic JavaScript execution, form submission, purchasing, commenting, messaging, publishing, or delete action.
 
 ## Requirements
 
 - Windows 10/11
 - Python 3.11+
-- Tailscale with Funnel available
+- Microsoft Edge
 - PowerShell 5.1+ or PowerShell 7
-
-Python dependencies are installed automatically by the launcher from `pyproject.toml`.
+- Tailscale Funnel for remote ChatGPT MCP access
 
 ## Quick start
 
@@ -62,188 +64,97 @@ git clone https://github.com/beifangzhishi-ops/china-apps-mcp.git
 cd china-apps-mcp
 ```
 
-The repository root contains:
+Double-click:
 
 ```text
 启动MCP.cmd
+```
+
+The launcher creates/updates `.venv`, installs the project, starts the gateway in the background, and waits for `/health`.
+
+To stop the gateway:
+
+```text
 停止MCP.cmd
 ```
 
-Double-click `启动MCP.cmd` to create/update `.venv`, install the project, start it in the background, and wait for `/health`.
+## Enable the Edge browser bridge
 
-Double-click `停止MCP.cmd` to stop only the process recorded in `.state/mcp.pid`.
+Set this in the local ignored `.env`:
 
-The `.cmd` bodies are intentionally ASCII-only and should remain UTF-8 **without BOM**. The PowerShell launcher scripts are also kept ASCII-only where practical for Windows PowerShell 5.1 compatibility.
+```text
+BROWSER_ENABLED=1
+```
+
+Then restart the MCP gateway.
+
+The browser bridge listens only on:
+
+```text
+ws://127.0.0.1:8766
+```
+
+Port 8766 is not the public MCP endpoint and should not be exposed through Tailscale Funnel or Windows Firewall.
+
+### Install the Edge extension
+
+1. Open Edge normally.
+2. Visit `edge://extensions/`.
+3. Enable **Developer mode**.
+4. Choose **Load unpacked**.
+5. Select this repository's `edge-extension` directory.
+6. Keep **China Apps Browser Bridge** enabled.
+
+The extension reconnects to the local bridge automatically. No special Edge shortcut or command-line flags are needed.
+
+See `edge-extension/README.md` for the permission model.
+
+### Browser allowlist
+
+The built-in list currently includes Taobao/Tmall, JD, Ctrip, Dianping/Meituan, Zhihu, Douyin, QQ/WeChat, and Bilibili domains.
+
+The extension itself has fixed host permissions in `edge-extension/manifest.json`. The MCP independently validates URLs and returned links a second time before returning data to ChatGPT.
+
+Tabs outside the allowlist are not exposed with title, URL, or page contents.
 
 ## OAuth setup for ChatGPT
 
-### 1. Pull the latest code
+The gateway supports:
 
-```powershell
-git pull
+```text
+MCP_AUTH_MODE=none
+MCP_AUTH_MODE=token
+MCP_AUTH_MODE=oauth
 ```
 
-### 2. Enable OAuth locally
+`oauth` is the recommended mode for a ChatGPT Custom MCP that can read account-authenticated browser pages.
 
 For the current Funnel host:
 
 ```powershell
-.\scripts\enable-oauth.ps1 -PublicBaseUrl https://cpa-node.tail7c23f0.ts.net
+.\scripts\enable-oauth.ps1 -PublicBaseUrl https://your-node.your-tailnet.ts.net
 ```
 
-The helper updates only the local ignored `.env` and:
-
-- sets `MCP_AUTH_MODE=oauth`;
-- sets `MCP_PUBLIC_BASE_URL`;
-- adds the Funnel hostname to `MCP_ALLOWED_HOSTS`;
-- creates a random `MCP_OAUTH_APPROVAL_SECRET` if one is missing;
-- keeps OAuth clients/tokens in `.state/oauth-state.json` so authorization survives normal restarts.
-
-如果本机授权密钥曾经泄露，使用下面的命令轮换密钥；命令不会打印密钥，也不会删除 OAuth 状态：
-
-```powershell
-.\scripts\enable-oauth.ps1 -PublicBaseUrl https://cpa-node.tail7c23f0.ts.net -RotateSecret
-```
-
-Do **not** paste `MCP_OAUTH_APPROVAL_SECRET`, `MCP_ACCESS_TOKEN`, OAuth tokens, or platform cookies into chat.
-
-### 3. Restart the gateway
-
-```text
-停止MCP.cmd
-启动MCP.cmd
-```
-
-Check local status:
-
-```powershell
-Invoke-RestMethod http://127.0.0.1:8765/health
-```
-
-Expected shape:
-
-```json
-{
-  "ok": true,
-  "service": "china-apps-mcp",
-  "version": "0.1.0",
-  "mcp_path": "/mcp",
-  "auth_mode": "oauth",
-  "auth_enabled": true
-}
-```
-
-### 4. Expose MCP + OAuth routes through Funnel
-
-Run an elevated PowerShell:
+Then restart the gateway and configure Funnel:
 
 ```powershell
 .\scripts\configure-funnel.ps1
 ```
 
-The script keeps an explicit `/mcp` route and also adds a root fallback for the OAuth endpoints on the same HTTPS origin. More-specific existing Funnel routes such as CPA `/v1` remain more specific than the root fallback.
-
-OAuth needs these public routes:
+The ChatGPT MCP server URL is:
 
 ```text
-/.well-known/oauth-authorization-server
-/.well-known/oauth-protected-resource
-/authorize
-/token
-/register
-/revoke
-/oauth/consent
-/mcp
+https://your-node.your-tailnet.ts.net/mcp
 ```
 
-The Python process itself still listens only on `127.0.0.1:8765`; no Windows firewall port needs to be opened.
+The OAuth approval secret is local-only. Do not paste `MCP_OAUTH_APPROVAL_SECRET`, `MCP_ACCESS_TOKEN`, OAuth tokens, cookies, or browser credentials into chat.
 
-### 5. Smoke-test OAuth discovery
-
-```powershell
-.\.venv\Scripts\python.exe .\scripts\test-oauth-discovery.py https://cpa-node.tail7c23f0.ts.net/mcp
-```
-
-在连接 ChatGPT 前，可在本机完整检查授权码、PKCE、token 交换、Bearer 访问和撤销：
+Useful local checks:
 
 ```powershell
+Invoke-RestMethod http://127.0.0.1:8765/health
 .\.venv\Scripts\python.exe .\scripts\test-oauth-flow.py
 ```
-
-脚本复用 `.state` 中已经注册的 ChatGPT 客户端；敏感值只提交给本机网关，不会打印授权密钥、客户端 secret 或 token。
-
-完整流程还会检查授权页的防双击脚本和重复提交提示；网关日志会记录 `AUTH_REQUEST_CREATED`、`CONSENT_GET`、`CONSENT_APPROVED`、`REDIRECT_SENT` 与 `TOKEN_EXCHANGE_SUCCESS` 等事件。日志只记录 hash 或非秘密字段。
-
-A healthy OAuth deployment should show:
-
-- unauthenticated `/mcp` returns `401`;
-- `WWW-Authenticate` is present;
-- OAuth authorization-server metadata is reachable;
-- protected-resource metadata is reachable;
-- protected-resource `authorization_servers` exactly matches the OAuth `issuer`, including the trailing slash;
-- protected-resource `resource` exactly matches the public MCP URL;
-- PKCE `S256` is advertised;
-- `authorization_endpoint`, `token_endpoint`, and `registration_endpoint` are advertised.
-
-### 6. Switch the ChatGPT plugin to OAuth
-
-In ChatGPT developer mode, edit/recreate the Custom MCP with:
-
-```text
-Name: China Apps MCP
-Server URL: https://cpa-node.tail7c23f0.ts.net/mcp
-Authentication: OAuth
-```
-
-ChatGPT should discover the OAuth endpoints and open the gateway approval page in the browser. Copy `MCP_OAUTH_APPROVAL_SECRET` from your **local `.env` file** into that browser page. The secret is for the human approval page only; it is never sent as an MCP tool argument.
-
-After approval, test:
-
-```text
-@China Apps MCP call gateway_ping
-```
-
-The result should report:
-
-```json
-{
-  "auth_mode": "oauth",
-  "auth_enabled": true
-}
-```
-
-## Static token mode
-
-For scripts or local debugging, set:
-
-```text
-MCP_AUTH_MODE=token
-MCP_ACCESS_TOKEN=<high-entropy-secret>
-```
-
-Then `/mcp` accepts:
-
-```text
-Authorization: Bearer <MCP_ACCESS_TOKEN>
-```
-
-The old remote smoke test remains available:
-
-```powershell
-.\.venv\Scripts\python.exe .\scripts\test-remote.py https://cpa-node.tail7c23f0.ts.net/mcp
-```
-
-## No-auth mode
-
-`MCP_AUTH_MODE=none` exists only for connectivity testing. Do not use it after adding account cookies or write tools.
-
-## Bilibili account PoC
-
-Public video metadata works without account credentials.
-
-Only after OAuth is verified end-to-end should `BILIBILI_COOKIE` be set locally for `bilibili_get_my_profile`. The cookie is never returned by the tools and `.env` is ignored by Git.
-
-Do **not** send Bilibili cookies, `SESSDATA`, QR-login state, browser profiles, or OAuth secrets through chat.
 
 ## Runtime and secret files
 
@@ -251,63 +162,42 @@ These are ignored by Git:
 
 ```text
 .env
-.state/mcp.pid
-.state/oauth-state.json
-logs/gateway.out.log
-logs/gateway.err.log
+.state/
+logs/
 cookies/
 profiles/
 ```
 
-## Funnel management
-
-Check:
-
-```powershell
-.\scripts\status.ps1
-```
-
-Disable only the China Apps MCP Funnel routes:
-
-```powershell
-.\scripts\disable-funnel.ps1
-```
-
-The disable script intentionally avoids `tailscale funnel reset` so unrelated routes such as CPA `/v1` are not cleared.
+Version 0.3 does not use `profiles/` for the browser bridge; the ignore remains for older/local experiments.
 
 ## Repository layout
 
 ```text
 .
+├─ edge-extension/
+│  ├─ manifest.json
+│  ├─ background.js
+│  └─ README.md
 ├─ src/china_apps_mcp/
 │  ├─ server.py
 │  ├─ oauth.py
 │  └─ adapters/
-│     └─ bilibili.py
+│     ├─ bilibili.py
+│     └─ browser.py
 ├─ scripts/
-│  ├─ init-env.ps1
-│  ├─ enable-oauth.ps1
-│  ├─ start.ps1
-│  ├─ stop.ps1
-│  ├─ status.ps1
-│  ├─ configure-funnel.ps1
-│  ├─ disable-funnel.ps1
-│  ├─ test-remote.py
-│  └─ test-oauth-discovery.py
+├─ tests/
 ├─ 启动MCP.cmd
 ├─ 停止MCP.cmd
 ├─ .env.example
-├─ .gitignore
 ├─ pyproject.toml
 └─ SECURITY.md
 ```
 
 ## Next milestones
 
-1. Verify ChatGPT OAuth login end-to-end.
-2. Enable the Bilibili account cookie only after OAuth is confirmed.
-3. Add Bilibili search, subtitles, favorites, history, and comments as read-only tools first.
-4. Add separate write scopes and explicit confirmation before any like/comment/publish/message operation.
-5. Add Zhihu, Douyin, QQ/OneBot, and WeChat adapters behind the same gateway.
+1. Validate the Edge bridge with logged-in Zhihu and Dianping pages.
+2. Improve snapshots for SPA/lazy-loaded pages without adding arbitrary JavaScript execution.
+3. Add semantic read-only adapters such as `zhihu_search`, `dianping_search`, `wechat_read_article`, and `ctrip_search_hotel`.
+4. Keep write actions out of scope until explicit confirmation/scoping is designed.
 
-See [SECURITY.md](SECURITY.md) before adding account or write capabilities.
+See `SECURITY.md` before expanding browser permissions or account-capable tools.
