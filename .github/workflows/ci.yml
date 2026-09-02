@@ -31,6 +31,12 @@ jobs:
       - name: Run regression tests
         run: python -m unittest discover -s tests -v
 
+      - name: Validate Edge extension manifest
+        run: python -m json.tool edge-extension/manifest.json > /dev/null
+
+      - name: Check Edge extension JavaScript
+        run: node --check edge-extension/background.js
+
       - name: Parse PowerShell scripts
         shell: pwsh
         run: |
