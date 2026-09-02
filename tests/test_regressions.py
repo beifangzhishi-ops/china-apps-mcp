@@ -7,6 +7,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from urllib.parse import urlencode
 
+from mcp.server.auth.provider import AccessToken, AuthorizeError
 from starlette.requests import Request
 
 from china_apps_mcp.oauth import LocalOAuthProvider, PendingAuthorization
@@ -50,20 +51,25 @@ class OAuthProviderRegressionTests(unittest.IsolatedAsyncioTestCase):
             scopes=["mcp"],
         )
 
-    def _pending(self) -> PendingAuthorization:
-        params = SimpleNamespace(
+    def _params(self, *, resource: str = "https://gateway.example/mcp") -> SimpleNamespace:
+        return SimpleNamespace(
             redirect_uri="https://client.example/callback",
             scopes=["mcp"],
             state="state-123",
             code_challenge="challenge",
             redirect_uri_provided_explicitly=True,
-            resource="https://gateway.example/mcp",
+            resource=resource,
         )
+
+    def _pending(self) -> PendingAuthorization:
         return PendingAuthorization(
             client_id="client-1",
-            params=params,
+            params=self._params(),
             created_at=time.time(),
         )
+
+    def _client(self) -> SimpleNamespace:
+        return SimpleNamespace(client_id="client-1")
 
     async def test_provider_keeps_full_oauth_contract(self) -> None:
         required_methods = {
@@ -117,6 +123,74 @@ class OAuthProviderRegressionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status_code, 200)
         self.assertIn("request-2", self.provider.pending)
         self.assertEqual(self.provider.pending["request-2"].failed_attempts, 1)
+
+    async def test_authorize_rejects_resource_for_another_server(self) -> None:
+        with self.assertRaises(AuthorizeError) as ctx:
+            await self.provider.authorize(
+                self._client(),
+                self._params(resource="https://other.example/mcp"),
+            )
+        self.assertEqual(ctx.exception.error, "invalid_target")
+        self.assertFalse(self.provider.pending)
+
+    async def test_access_token_must_match_the_mcp_resource(self) -> None:
+        token = AccessToken(
+            token="mcp_at_wrong_resource",
+            client_id="client-1",
+            scopes=["mcp"],
+            expires_at=int(time.time()) + 3600,
+            resource="https://other.example/mcp",
+        )
+        self.provider.access_tokens[token.token] = token
+
+        loaded = await self.provider.load_access_token(token.token)
+
+        self.assertIsNone(loaded)
+        self.assertNotIn(token.token, self.provider.access_tokens)
+
+    async def test_refresh_rotation_preserves_resource_and_family(self) -> None:
+        issued = self.provider._mint_token_pair(
+            client_id="client-1",
+            scopes=["mcp"],
+            resource="https://gateway.example/mcp",
+        )
+        self.assertIsNotNone(issued.refresh_token)
+        old_refresh = str(issued.refresh_token)
+        current = self.provider.refresh_tokens[old_refresh]
+        original_family = self.provider.token_grants[old_refresh].family_id
+
+        refreshed = await self.provider.exchange_refresh_token(
+            self._client(),
+            current,
+            ["mcp"],
+        )
+
+        self.assertNotIn(old_refresh, self.provider.refresh_tokens)
+        self.assertNotIn(old_refresh, self.provider.token_grants)
+        self.assertIsNotNone(refreshed.refresh_token)
+        new_refresh = str(refreshed.refresh_token)
+        new_access = self.provider.access_tokens[refreshed.access_token]
+        self.assertEqual(new_access.resource, "https://gateway.example/mcp")
+        self.assertEqual(self.provider.token_grants[new_refresh].resource, "https://gateway.example/mcp")
+        self.assertEqual(self.provider.token_grants[new_refresh].family_id, original_family)
+        self.assertEqual(self.provider.token_grants[refreshed.access_token].family_id, original_family)
+
+    async def test_revoking_one_token_revokes_its_whole_family(self) -> None:
+        issued = self.provider._mint_token_pair(
+            client_id="client-1",
+            scopes=["mcp"],
+            resource="https://gateway.example/mcp",
+        )
+        self.assertIsNotNone(issued.refresh_token)
+        refresh_value = str(issued.refresh_token)
+        access = self.provider.access_tokens[issued.access_token]
+
+        await self.provider.revoke_token(access)
+
+        self.assertNotIn(issued.access_token, self.provider.access_tokens)
+        self.assertNotIn(refresh_value, self.provider.refresh_tokens)
+        self.assertNotIn(issued.access_token, self.provider.token_grants)
+        self.assertNotIn(refresh_value, self.provider.token_grants)
 
 
 class BearerRegressionTests(unittest.TestCase):
