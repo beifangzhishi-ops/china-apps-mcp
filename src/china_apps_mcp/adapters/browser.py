@@ -1,13 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
-from pathlib import Path
+import uuid
 from typing import Any
 from urllib.parse import urlparse
 
-import httpx
-from playwright.async_api import Browser, BrowserContext, Page, Playwright, async_playwright
+from websockets.asyncio.server import Server, ServerConnection, serve
 
 _DEFAULT_ALLOWED_HOSTS = (
     "taobao.com",
@@ -24,7 +24,9 @@ _DEFAULT_ALLOWED_HOSTS = (
     "bilibili.com",
 )
 
-_LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1"}
+_BRIDGE_HOST = "127.0.0.1"
+_BRIDGE_PORT = 8766
+_MAX_BRIDGE_MESSAGE = 2 * 1024 * 1024
 
 
 def _env_flag(name: str, default: bool = False) -> bool:
@@ -65,305 +67,315 @@ def _validated_url(url: str) -> str:
     return candidate
 
 
-def _validated_cdp_url(url: str) -> str:
-    candidate = url.strip().rstrip("/")
-    parsed = urlparse(candidate)
-    if parsed.scheme != "http":
-        raise ValueError("BROWSER_CDP_URL must use http:// on loopback")
-    host = (parsed.hostname or "").lower()
-    if host not in _LOOPBACK_HOSTS:
-        raise ValueError("BROWSER_CDP_URL must point to 127.0.0.1, localhost, or ::1")
-    if parsed.path not in {"", "/"} or parsed.query or parsed.fragment or parsed.username or parsed.password:
-        raise ValueError("BROWSER_CDP_URL must be a loopback origin such as http://127.0.0.1:9222")
-    try:
-        port = parsed.port
-    except ValueError as exc:
-        raise ValueError("BROWSER_CDP_URL has an invalid port") from exc
-    if port is None or not 1 <= port <= 65535:
-        raise ValueError("BROWSER_CDP_URL must include a valid TCP port")
-    return candidate
+def _safe_page_result(result: dict[str, Any], max_chars: int) -> dict[str, Any]:
+    url = _validated_url(str(result.get("url", "")))
+    title = str(result.get("title", ""))[:500]
+    text = str(result.get("text", ""))
+    links_out: list[dict[str, str]] = []
+    raw_links = result.get("links", [])
+    if isinstance(raw_links, list):
+        for item in raw_links[:150]:
+            if not isinstance(item, dict):
+                continue
+            href = str(item.get("href", ""))
+            try:
+                href = _validated_url(href)
+            except ValueError:
+                continue
+            links_out.append(
+                {
+                    "text": str(item.get("text", ""))[:200],
+                    "href": href,
+                }
+            )
+
+    return {
+        "title": title,
+        "url": url,
+        "text": text[:max_chars],
+        "truncated": len(text) > max_chars,
+        "text_chars": len(text),
+        "links": links_out,
+    }
 
 
-def _cdp_url() -> str:
-    return _validated_cdp_url(os.getenv("BROWSER_CDP_URL", "http://127.0.0.1:9222"))
-
-
-def _profile_dir() -> Path:
-    configured = os.getenv("BROWSER_PROFILE_DIR", "profiles/chrome").strip() or "profiles/chrome"
-    path = Path(configured).expanduser()
-    if not path.is_absolute():
-        path = Path.cwd() / path
-    return path.resolve()
-
-
-async def _wait_for_text_settle(page: Page, timeout_ms: int = 5_000) -> None:
-    """Wait briefly for SPA text to settle without depending on networkidle."""
-    deadline = asyncio.get_running_loop().time() + timeout_ms / 1000
-    stable_count = 0
-    previous = -1
-    while asyncio.get_running_loop().time() < deadline:
-        try:
-            current = len(await page.locator("body").inner_text(timeout=1_000))
-        except Exception:
-            current = -1
-        if current >= 0 and current == previous:
-            stable_count += 1
-            if stable_count >= 3:
-                return
-        else:
-            stable_count = 0
-            previous = current
-        await page.wait_for_timeout(300)
-
-
-class BrowserRuntime:
-    """Attach-only runtime for a user-started Chrome with remote debugging enabled."""
+class BrowserBridge:
+    """Local-only WebSocket bridge to the Edge extension."""
 
     def __init__(self) -> None:
-        self._lock = asyncio.Lock()
-        self._playwright: Playwright | None = None
-        self._browser: Browser | None = None
-        self._context: BrowserContext | None = None
+        self._server: Server | None = None
+        self._connection: ServerConnection | None = None
+        self._connection_lock = asyncio.Lock()
+        self._send_lock = asyncio.Lock()
+        self._pending: dict[str, asyncio.Future[dict[str, Any]]] = {}
+        self._metadata: dict[str, Any] = {}
 
     @property
     def enabled(self) -> bool:
         return _env_flag("BROWSER_ENABLED", False)
 
-    def _attached(self) -> bool:
-        return self._browser is not None and self._browser.is_connected() and self._context is not None
+    @property
+    def connected(self) -> bool:
+        return self._connection is not None
 
-    async def _probe_cdp(self) -> bool:
+    async def start(self) -> None:
+        if not self.enabled or self._server is not None:
+            return
+        self._server = await serve(
+            self._handle_connection,
+            _BRIDGE_HOST,
+            _BRIDGE_PORT,
+            max_size=_MAX_BRIDGE_MESSAGE,
+            ping_interval=20,
+            ping_timeout=20,
+        )
+
+    async def stop(self) -> None:
+        async with self._connection_lock:
+            connection = self._connection
+            self._connection = None
+            self._metadata = {}
+            self._fail_pending(RuntimeError("Browser bridge stopped"))
+
+        if connection is not None:
+            try:
+                await connection.close(code=1001, reason="MCP gateway stopping")
+            except Exception:
+                pass
+
+        server = self._server
+        self._server = None
+        if server is not None:
+            server.close()
+            await server.wait_closed()
+
+    def _fail_pending(self, exc: Exception) -> None:
+        pending = list(self._pending.values())
+        self._pending.clear()
+        for future in pending:
+            if not future.done():
+                future.set_exception(exc)
+
+    async def _handle_connection(self, websocket: ServerConnection) -> None:
+        origin = websocket.request.headers.get("Origin")
+        if origin and not origin.startswith(
+            ("chrome-extension://", "extension://", "ms-browser-extension://")
+        ):
+            await websocket.close(code=1008, reason="Extension origin required")
+            return
+
+        async with self._connection_lock:
+            previous = self._connection
+            self._connection = websocket
+            self._metadata = {}
+            self._fail_pending(RuntimeError("Browser extension reconnected"))
+
+        if previous is not None and previous is not websocket:
+            try:
+                await previous.close(code=1000, reason="Replaced by newer extension connection")
+            except Exception:
+                pass
+
         try:
-            async with httpx.AsyncClient(timeout=1.5, trust_env=False) as client:
-                response = await client.get(f"{_cdp_url()}/json/version")
-                return response.status_code == 200
-        except Exception:
-            return False
+            async for raw in websocket:
+                if not isinstance(raw, str):
+                    continue
+                try:
+                    message = json.loads(raw)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(message, dict):
+                    continue
 
-    async def _ensure_attached(self) -> BrowserContext:
+                message_type = message.get("type")
+                if message_type == "hello":
+                    self._metadata = {
+                        "extension_version": str(message.get("version", ""))[:50],
+                        "browser": str(message.get("browser", ""))[:50],
+                    }
+                    continue
+                if message_type != "response":
+                    continue
+
+                request_id = str(message.get("id", ""))
+                future = self._pending.pop(request_id, None)
+                if future is None or future.done():
+                    continue
+
+                if message.get("ok") is True:
+                    result = message.get("result")
+                    future.set_result(result if isinstance(result, dict) else {"value": result})
+                else:
+                    error = str(message.get("error", "Browser extension request failed"))
+                    future.set_exception(RuntimeError(error))
+        finally:
+            async with self._connection_lock:
+                if self._connection is websocket:
+                    self._connection = None
+                    self._metadata = {}
+                    self._fail_pending(RuntimeError("Browser extension disconnected"))
+
+    async def request(
+        self,
+        action: str,
+        payload: dict[str, Any] | None = None,
+        *,
+        timeout: float = 20.0,
+    ) -> dict[str, Any]:
         if not self.enabled:
             raise RuntimeError(
-                "Browser runtime is disabled. Set BROWSER_ENABLED=1 in .env and restart the MCP gateway."
+                "Browser bridge is disabled. Set BROWSER_ENABLED=1 in .env and restart the MCP gateway."
+            )
+        connection = self._connection
+        if connection is None:
+            raise RuntimeError(
+                "Edge extension is not connected. Open Edge normally and ensure "
+                "the China Apps Browser Bridge extension is enabled."
             )
 
-        async with self._lock:
-            if self._attached():
-                assert self._context is not None
-                return self._context
+        request_id = uuid.uuid4().hex
+        loop = asyncio.get_running_loop()
+        future: asyncio.Future[dict[str, Any]] = loop.create_future()
+        self._pending[request_id] = future
 
-            await self._detach_locked()
-            endpoint = _cdp_url()
-            if not await self._probe_cdp():
-                raise RuntimeError(
-                    f"No debuggable Chrome is available at {endpoint}. "
-                    "Start the dedicated Chrome first (for example with 启动浏览器.cmd), then retry."
-                )
-
-            self._playwright = await async_playwright().start()
-            try:
-                self._browser = await self._playwright.chromium.connect_over_cdp(endpoint)
-                contexts = self._browser.contexts
-                if not contexts:
-                    raise RuntimeError("Chrome connected over CDP but exposed no browser context")
-                self._context = contexts[0]
-            except Exception:
-                await self._detach_locked()
-                raise
-
-            return self._context
-
-    async def _detach_locked(self) -> None:
-        # Do not call Browser.close(): Chrome belongs to the user, not to this MCP process.
-        playwright = self._playwright
-        self._context = None
-        self._browser = None
-        self._playwright = None
-        if playwright is not None:
-            try:
-                await playwright.stop()
-            except Exception:
-                pass
+        message = {
+            "type": "request",
+            "id": request_id,
+            "action": action,
+            "payload": payload or {},
+        }
+        try:
+            async with self._send_lock:
+                await connection.send(json.dumps(message, ensure_ascii=False))
+            return await asyncio.wait_for(future, timeout=timeout)
+        except Exception:
+            self._pending.pop(request_id, None)
+            if not future.done():
+                future.cancel()
+            raise
 
     async def status(self) -> dict[str, Any]:
-        attached = self._attached()
-        page_count = 0
-        if attached and self._context is not None:
-            try:
-                page_count = len(self._context.pages)
-            except Exception:
-                attached = False
-
         return {
             "enabled": self.enabled,
-            "mode": "attach",
-            "attached": attached,
-            "chrome_debug_endpoint_ready": await self._probe_cdp() if self.enabled else False,
-            "page_count": page_count,
-            "cdp_url": _cdp_url(),
-            "profile_dir": str(_profile_dir()),
+            "mode": "edge_extension",
+            "bridge_host": _BRIDGE_HOST,
+            "bridge_port": _BRIDGE_PORT,
+            "extension_connected": self.connected,
+            "extension": dict(self._metadata),
             "allowed_hosts": list(_allowed_hosts()),
-            "persistent_profile": True,
-            "chrome_owned_by_mcp": False,
         }
 
-    async def start(self) -> dict[str, Any]:
-        """Attach to the already-running dedicated Chrome; never launch Chrome itself."""
-        await self._ensure_attached()
-        return await self.status()
 
-    async def _last_allowed_page(self) -> Page:
-        context = await self._ensure_attached()
-        for page in reversed(context.pages):
-            try:
-                _validated_url(page.url)
-                return page
-            except ValueError:
-                continue
-        raise RuntimeError("No currently open tab is on an allowed browser host")
-
-    async def _navigate_checked(self, page: Page, url: str) -> None:
-        target = _validated_url(url)
-        await page.goto(target, wait_until="domcontentloaded", timeout=30_000)
-        await _wait_for_text_settle(page)
-        _validated_url(page.url)
-
-    async def open(self, url: str) -> dict[str, Any]:
-        context = await self._ensure_attached()
-        page = await context.new_page()
-        try:
-            await self._navigate_checked(page, url)
-        except Exception:
-            await page.close()
-            raise
-        return {
-            "title": await page.title(),
-            "url": page.url,
-            "page_index": context.pages.index(page),
-        }
-
-    async def _extract_page(self, page: Page, max_chars: int) -> dict[str, Any]:
-        _validated_url(page.url)
-        best_text = ""
-        best_selector = ""
-        for selector in ("#js_content", "article", "main", "[role='main']", "body"):
-            try:
-                locator = page.locator(selector).first
-                if await locator.count() == 0:
-                    continue
-                text = (await locator.inner_text(timeout=5_000)).strip()
-                if len(text) > len(best_text):
-                    best_text = text
-                    best_selector = selector
-                if selector == "#js_content" and text:
-                    break
-            except Exception:
-                continue
-
-        links: list[dict[str, str]] = []
-        try:
-            raw_links = await page.locator("a[href]").evaluate_all(
-                """els => els.slice(0, 150).map(a => ({
-                    text: (a.innerText || a.textContent || '').trim().slice(0, 200),
-                    href: a.href || ''
-                }))"""
-            )
-            for item in raw_links:
-                href = str(item.get("href", ""))
-                text = str(item.get("text", ""))
-                try:
-                    _validated_url(href)
-                except ValueError:
-                    continue
-                links.append({"text": text, "href": href})
-        except Exception:
-            pass
-
-        truncated = len(best_text) > max_chars
-        return {
-            "title": await page.title(),
-            "url": page.url,
-            "selector": best_selector or None,
-            "text": best_text[:max_chars],
-            "truncated": truncated,
-            "text_chars": len(best_text),
-            "links": links,
-        }
-
-    async def read_page(self, url: str = "", max_chars: int = 30_000) -> dict[str, Any]:
-        if max_chars < 1_000 or max_chars > 60_000:
-            raise ValueError("max_chars must be between 1000 and 60000")
-
-        if not url.strip():
-            page = await self._last_allowed_page()
-            await _wait_for_text_settle(page, timeout_ms=2_000)
-            return await self._extract_page(page, max_chars)
-
-        # URL reads use a dedicated temporary tab so concurrent GPT calls cannot
-        # navigate or overwrite a human login tab (or each other's tab).
-        context = await self._ensure_attached()
-        page = await context.new_page()
-        try:
-            await self._navigate_checked(page, url)
-            return await self._extract_page(page, max_chars)
-        finally:
-            try:
-                await page.close()
-            except Exception:
-                pass
-
-    async def list_pages(self) -> dict[str, Any]:
-        context = await self._ensure_attached()
-        pages: list[dict[str, Any]] = []
-        for index, page in enumerate(context.pages):
-            try:
-                _validated_url(page.url)
-            except ValueError:
-                pages.append({"index": index, "allowed": False})
-                continue
-
-            try:
-                title = await page.title()
-            except Exception:
-                title = ""
-            pages.append({"index": index, "title": title, "url": page.url, "allowed": True})
-        return {"pages": pages}
-
-    async def stop(self) -> dict[str, Any]:
-        async with self._lock:
-            await self._detach_locked()
-        return await self.status()
+_bridge = BrowserBridge()
 
 
-_runtime = BrowserRuntime()
+async def start_browser_bridge() -> None:
+    await _bridge.start()
+
+
+async def stop_browser_bridge() -> None:
+    await _bridge.stop()
 
 
 def register_browser_tools(mcp: Any) -> None:
     @mcp.tool()
     async def browser_status() -> dict[str, Any]:
-        """Report whether the user-started Chrome debug endpoint is ready and whether MCP is attached."""
-        return await _runtime.status()
+        """Report Edge extension bridge status and the browser host allowlist."""
+        return await _bridge.status()
 
     @mcp.tool()
     async def browser_start() -> dict[str, Any]:
-        """Attach to the dedicated Chrome already started by the user; this tool never launches Chrome."""
-        return await _runtime.start()
+        """Compatibility check: verify the normal Edge extension is connected to the local bridge."""
+        status = await _bridge.status()
+        if not status["enabled"]:
+            raise RuntimeError("Browser bridge is disabled. Set BROWSER_ENABLED=1 and restart the gateway.")
+        if not status["extension_connected"]:
+            raise RuntimeError(
+                "Edge extension is not connected. Open Edge normally and enable the China Apps Browser Bridge extension."
+            )
+        return status
 
     @mcp.tool()
     async def browser_open(url: str) -> dict[str, Any]:
-        """Open one allowed URL in a new tab of the attached Chrome. Intended for read-only information gathering."""
-        return await _runtime.open(url)
+        """Open one allowed URL in a normal Edge tab through the local extension."""
+        target = _validated_url(url)
+        result = await _bridge.request("open_tab", {"url": target, "active": True, "wait_ms": 750})
+        final_url = _validated_url(str(result.get("url", "")))
+        return {
+            "tab_id": int(result.get("tab_id", 0)),
+            "title": str(result.get("title", ""))[:500],
+            "url": final_url,
+        }
 
     @mcp.tool()
-    async def browser_read_page(url: str = "", max_chars: int = 30_000) -> dict[str, Any]:
-        """Read visible text and links from an allowed URL or the latest already-open allowed tab."""
-        return await _runtime.read_page(url=url, max_chars=max_chars)
+    async def browser_read_page(
+        url: str = "",
+        tab_id: int = 0,
+        max_chars: int = 30_000,
+    ) -> dict[str, Any]:
+        """Read visible text and links from an allowed URL or an already-open Edge tab."""
+        if max_chars < 1_000 or max_chars > 60_000:
+            raise ValueError("max_chars must be between 1000 and 60000")
+        if url.strip() and tab_id:
+            raise ValueError("Provide either url or tab_id, not both")
+
+        if url.strip():
+            target = _validated_url(url)
+            opened = await _bridge.request(
+                "open_tab",
+                {"url": target, "active": False, "wait_ms": 1_200},
+            )
+            temporary_tab_id = int(opened.get("tab_id", 0))
+            if temporary_tab_id <= 0:
+                raise RuntimeError("Edge extension did not return a valid tab id")
+            try:
+                snapshot = await _bridge.request("snapshot", {"tab_id": temporary_tab_id})
+                return _safe_page_result(snapshot, max_chars)
+            finally:
+                try:
+                    await _bridge.request("close_tab", {"tab_id": temporary_tab_id}, timeout=5.0)
+                except Exception:
+                    pass
+
+        snapshot_payload: dict[str, Any] = {}
+        if tab_id:
+            snapshot_payload["tab_id"] = tab_id
+        snapshot = await _bridge.request("snapshot", snapshot_payload)
+        return _safe_page_result(snapshot, max_chars)
 
     @mcp.tool()
     async def browser_list_pages() -> dict[str, Any]:
-        """List Chrome tabs; details are returned only for tabs on MCP-allowed hosts."""
-        return await _runtime.list_pages()
+        """List Edge tabs; details are returned only for tabs on MCP-allowed hosts."""
+        result = await _bridge.request("list_tabs")
+        raw_tabs = result.get("tabs", [])
+        pages: list[dict[str, Any]] = []
+        if not isinstance(raw_tabs, list):
+            return {"pages": pages}
+
+        for item in raw_tabs[:200]:
+            if not isinstance(item, dict):
+                continue
+            tab_id = int(item.get("tab_id", 0))
+            url = str(item.get("url", ""))
+            try:
+                url = _validated_url(url)
+            except ValueError:
+                pages.append({"tab_id": tab_id, "allowed": False})
+                continue
+            pages.append(
+                {
+                    "tab_id": tab_id,
+                    "title": str(item.get("title", ""))[:500],
+                    "url": url,
+                    "active": bool(item.get("active", False)),
+                    "allowed": True,
+                }
+            )
+        return {"pages": pages}
 
     @mcp.tool()
     async def browser_stop() -> dict[str, Any]:
-        """Detach MCP from Chrome without closing Chrome or deleting its persistent login state."""
-        return await _runtime.stop()
+        """Compatibility no-op: the extension remains connected because Edge is user-owned."""
+        status = await _bridge.status()
+        status["note"] = "Edge remains open; disable the extension to disconnect the browser bridge."
+        return status
