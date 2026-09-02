@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import hashlib
 import hmac
 import html
 import json
+import logging
 import secrets
 import time
 from dataclasses import dataclass
@@ -24,12 +26,25 @@ from starlette.requests import Request
 from starlette.responses import HTMLResponse, RedirectResponse, Response
 
 
+logger = logging.getLogger(__name__)
+
+
+def short_hash(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()[:12]
+
+
 @dataclass
 class PendingAuthorization:
     client_id: str
     params: AuthorizationParams
     created_at: float
     failed_attempts: int = 0
+
+
+@dataclass
+class CompletedConsent:
+    completed_at: float
+    redirect_url: str
 
 
 class LocalOAuthProvider(
@@ -60,6 +75,7 @@ class LocalOAuthProvider(
         self.access_tokens: dict[str, AccessToken] = {}
         self.refresh_tokens: dict[str, RefreshToken] = {}
         self.pending: dict[str, PendingAuthorization] = {}
+        self.completed_consents: dict[str, CompletedConsent] = {}
         self._load_state()
 
     def _load_state(self) -> None:
@@ -102,6 +118,11 @@ class LocalOAuthProvider(
             key: value
             for key, value in self.pending.items()
             if value.created_at + 300 > now
+        }
+        self.completed_consents = {
+            key: value
+            for key, value in self.completed_consents.items()
+            if value.completed_at + 300 > now
         }
         self.codes = {
             key: value
@@ -156,6 +177,14 @@ class LocalOAuthProvider(
             params=params,
             created_at=time.time(),
         )
+        logger.info(
+            "AUTH_REQUEST_CREATED request=%s client=%s state=%s redirect_uri=%s timestamp=%d",
+            short_hash(request_id),
+            client.client_id,
+            short_hash(str(params.state or "")),
+            str(params.redirect_uri),
+            int(time.time()),
+        )
         return f"{self.public_base_url}/oauth/consent?request={quote(request_id, safe='')}"
 
     async def load_authorization_code(
@@ -174,14 +203,34 @@ class LocalOAuthProvider(
         client: OAuthClientInformationFull,
         authorization_code: AuthorizationCode,
     ) -> OAuthToken:
+        code_hash = short_hash(authorization_code.code)
         current = self.codes.pop(authorization_code.code, None)
         if current is None or current.client_id != client.client_id:
+            logger.warning(
+                "TOKEN_EXCHANGE_FAILED code=%s client=%s",
+                code_hash,
+                client.client_id,
+            )
             raise TokenError("invalid_grant", "authorization code is invalid or already used")
-        return self._mint_token_pair(
-            client_id=current.client_id,
-            scopes=current.scopes,
-            resource=current.resource,
+        try:
+            token = self._mint_token_pair(
+                client_id=current.client_id,
+                scopes=current.scopes,
+                resource=current.resource,
+            )
+        except Exception:
+            logger.exception(
+                "TOKEN_EXCHANGE_FAILED code=%s client=%s",
+                code_hash,
+                client.client_id,
+            )
+            raise
+        logger.info(
+            "TOKEN_EXCHANGE_SUCCESS code=%s client=%s",
+            code_hash,
+            client.client_id,
         )
+        return token
 
     async def load_access_token(self, token: str) -> AccessToken | None:
         item = self.access_tokens.get(token)
@@ -263,14 +312,38 @@ button{{padding:10px 16px;margin-right:8px}} .error{{color:#b00020}} code{{word-
 <input type="password" name="secret" autocomplete="current-password" required autofocus>
 <button type="submit" name="action" value="approve">Approve</button>
 <button type="submit" name="action" value="deny" formnovalidate>Deny</button>
-</form></div></body></html>"""
+</form></div>
+<script>
+document.querySelector("form").addEventListener("submit", function () {{
+    this.querySelectorAll("button").forEach(function (button) {{
+        button.disabled = true;
+    }});
+}});
+</script></body></html>"""
         return HTMLResponse(body, headers=self._page_headers())
+
+    def _completed_consent_response(self) -> HTMLResponse:
+        return HTMLResponse(
+            "<h1>Authorization already completed.</h1>"
+            "<p>Please return to ChatGPT and continue.</p>",
+            status_code=409,
+            headers=self._page_headers(),
+        )
 
     async def consent_get(self, request: Request) -> Response:
         self._cleanup_ephemeral()
         request_id = request.query_params.get("request", "")
         pending = self.pending.get(request_id)
+        completed = self.completed_consents.get(request_id)
+        logger.info(
+            "CONSENT_GET request=%s exists=%s completed=%s",
+            short_hash(request_id),
+            pending is not None,
+            completed is not None,
+        )
         if pending is None:
+            if completed is not None:
+                return self._completed_consent_response()
             return HTMLResponse(
                 "Authorization request is missing or expired.",
                 status_code=400,
@@ -287,6 +360,9 @@ button{{padding:10px 16px;margin-right:8px}} .error{{color:#b00020}} code{{word-
         secret = form.get("secret", [""])[0]
         pending = self.pending.get(request_id)
         if pending is None:
+            if request_id in self.completed_consents:
+                logger.info("CONSENT_DUPLICATE request=%s", short_hash(request_id))
+                return self._completed_consent_response()
             return HTMLResponse(
                 "Authorization request is missing or expired.",
                 status_code=400,
@@ -294,13 +370,24 @@ button{{padding:10px 16px;margin-right:8px}} .error{{color:#b00020}} code{{word-
             )
 
         if action == "deny":
+            redirect_url = construct_redirect_uri(
+                str(pending.params.redirect_uri),
+                error="access_denied",
+                state=pending.params.state,
+            )
+            self.completed_consents[request_id] = CompletedConsent(
+                completed_at=time.time(),
+                redirect_url=redirect_url,
+            )
             self.pending.pop(request_id, None)
+            logger.info("CONSENT_DENIED request=%s", short_hash(request_id))
+            logger.info(
+                "REDIRECT_SENT request=%s code_hash=%s",
+                short_hash(request_id),
+                "none",
+            )
             return RedirectResponse(
-                construct_redirect_uri(
-                    str(pending.params.redirect_uri),
-                    error="access_denied",
-                    state=pending.params.state,
-                ),
+                redirect_url,
                 status_code=302,
                 headers={"Cache-Control": "no-store"},
             )
@@ -312,6 +399,11 @@ button{{padding:10px 16px;margin-right:8px}} .error{{color:#b00020}} code{{word-
         expected_bytes = self.approval_secret.encode("utf-8")
         if not hmac.compare_digest(secret_bytes, expected_bytes):
             pending.failed_attempts += 1
+            logger.info(
+                "CONSENT_SECRET_REJECTED request=%s attempts=%d",
+                short_hash(request_id),
+                pending.failed_attempts,
+            )
             if pending.failed_attempts >= 5:
                 self.pending.pop(request_id, None)
                 return HTMLResponse(
@@ -321,6 +413,7 @@ button{{padding:10px 16px;margin-right:8px}} .error{{color:#b00020}} code{{word-
                 )
             return self._render_consent(request_id, pending, "Approval secret is incorrect.")
 
+        logger.info("CONSENT_APPROVED request=%s", short_hash(request_id))
         code_value = "mcp_code_" + secrets.token_urlsafe(32)
         code = AuthorizationCode(
             code=code_value,
@@ -333,17 +426,26 @@ button{{padding:10px 16px;margin-right:8px}} .error{{color:#b00020}} code{{word-
             resource=pending.params.resource,
         )
         self.codes[code_value] = code
-        redirect = RedirectResponse(
-            construct_redirect_uri(
-                str(pending.params.redirect_uri),
-                code=code_value,
-                state=pending.params.state,
-            ),
+        redirect_url = construct_redirect_uri(
+            str(pending.params.redirect_uri),
+            code=code_value,
+            state=pending.params.state,
+        )
+        self.completed_consents[request_id] = CompletedConsent(
+            completed_at=time.time(),
+            redirect_url=redirect_url,
+        )
+        self.pending.pop(request_id, None)
+        logger.info(
+            "REDIRECT_SENT request=%s code_hash=%s",
+            short_hash(request_id),
+            short_hash(code_value),
+        )
+        return RedirectResponse(
+            redirect_url,
             status_code=302,
             headers={"Cache-Control": "no-store"},
         )
-        self.pending.pop(request_id, None)
-        return redirect
 
 
 def oauth_resource_metadata(public_mcp_url: str, public_base_url: str, scopes: list[str]) -> dict[str, Any]:

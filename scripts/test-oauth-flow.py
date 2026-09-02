@@ -85,6 +85,11 @@ def main() -> int:
             raise SystemExit("Authorization response did not contain a consent request ID.")
         print("Authorization endpoint: OK")
 
+        consent_page_response = client.get("/oauth/consent", params={"request": request_id})
+        if consent_page_response.status_code != 200 or "addEventListener(\"submit\"" not in consent_page_response.text:
+            raise SystemExit("Consent page did not include the duplicate-submit guard.")
+        print("Consent page guard: OK")
+
         consent_response = client.post(
             "/oauth/consent",
             data={
@@ -102,6 +107,18 @@ def main() -> int:
         if not authorization_code or returned_state != expected_state:
             raise SystemExit("Consent callback did not return the expected code and state.")
         print("Consent callback: OK")
+
+        duplicate_response = client.post(
+            "/oauth/consent",
+            data={
+                "request": request_id,
+                "secret": approval_secret,
+                "action": "approve",
+            },
+        )
+        if duplicate_response.status_code != 409 or "Authorization already completed" not in duplicate_response.text:
+            raise SystemExit("Duplicate consent submission was not handled explicitly.")
+        print("Duplicate consent: OK")
 
         token_response = client.post(
             "/token",

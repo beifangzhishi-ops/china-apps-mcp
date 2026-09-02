@@ -172,6 +172,8 @@ The Python process itself still listens only on `127.0.0.1:8765`; no Windows fir
 
 脚本复用 `.state` 中已经注册的 ChatGPT 客户端；敏感值只提交给本机网关，不会打印授权密钥、客户端 secret 或 token。
 
+完整流程还会检查授权页的防双击脚本和重复提交提示；网关日志会记录 `AUTH_REQUEST_CREATED`、`CONSENT_GET`、`CONSENT_APPROVED`、`REDIRECT_SENT` 与 `TOKEN_EXCHANGE_SUCCESS` 等事件。日志只记录 hash 或非秘密字段。
+
 A healthy OAuth deployment should show:
 
 - unauthenticated `/mcp` returns `401`;
