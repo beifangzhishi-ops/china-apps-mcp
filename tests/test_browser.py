@@ -4,9 +4,11 @@ import inspect
 import unittest
 
 from china_apps_mcp.adapters.browser import (
-    BrowserRuntime,
+    BrowserBridge,
+    _BRIDGE_HOST,
+    _BRIDGE_PORT,
     _host_allowed,
-    _validated_cdp_url,
+    _safe_page_result,
     _validated_url,
 )
 
@@ -33,34 +35,33 @@ class BrowserAllowlistTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             _validated_url("http://127.0.0.1:8765/health")
 
-
-class BrowserCdpTests(unittest.TestCase):
-    def test_cdp_endpoint_must_be_loopback_http_origin(self) -> None:
-        self.assertEqual(
-            _validated_cdp_url("http://127.0.0.1:9222/"),
-            "http://127.0.0.1:9222",
+    def test_page_result_filters_links_again_on_mcp_side(self) -> None:
+        result = _safe_page_result(
+            {
+                "title": "Example",
+                "url": "https://www.zhihu.com/question/1",
+                "text": "hello",
+                "links": [
+                    {"text": "allowed", "href": "https://www.zhihu.com/question/2"},
+                    {"text": "blocked", "href": "https://example.com/secret"},
+                ],
+            },
+            30000,
         )
-        self.assertEqual(
-            _validated_cdp_url("http://localhost:9222"),
-            "http://localhost:9222",
-        )
+        self.assertEqual(len(result["links"]), 1)
+        self.assertEqual(result["links"][0]["text"], "allowed")
 
-        for invalid in (
-            "https://127.0.0.1:9222",
-            "http://192.168.1.10:9222",
-            "http://example.com:9222",
-            "http://127.0.0.1",
-            "http://127.0.0.1:9222/json/version",
-        ):
-            with self.subTest(invalid=invalid):
-                with self.assertRaises(ValueError):
-                    _validated_cdp_url(invalid)
 
-    def test_runtime_is_attach_only(self) -> None:
-        source = inspect.getsource(BrowserRuntime._ensure_attached)
-        self.assertIn("connect_over_cdp", source)
-        self.assertNotIn("launch_persistent_context", source)
-        self.assertNotIn(".launch(", source)
+class EdgeBridgeArchitectureTests(unittest.TestCase):
+    def test_bridge_is_loopback_only(self) -> None:
+        self.assertEqual(_BRIDGE_HOST, "127.0.0.1")
+        self.assertEqual(_BRIDGE_PORT, 8766)
+
+    def test_runtime_contains_no_playwright_or_cdp(self) -> None:
+        source = inspect.getsource(BrowserBridge)
+        self.assertNotIn("playwright", source.lower())
+        self.assertNotIn("connect_over_cdp", source)
+        self.assertNotIn("remote-debugging", source)
 
 
 if __name__ == "__main__":
