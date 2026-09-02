@@ -98,15 +98,16 @@ def main() -> int:
                 "action": "approve",
             },
         )
-        if consent_response.status_code != 302:
+        if consent_response.status_code not in {302, 303}:
             raise SystemExit(f"Consent failed: HTTP {consent_response.status_code}")
-        callback_url = urlparse(consent_response.headers["location"])
+        callback_location = consent_response.headers.get("location", "")
+        callback_url = urlparse(callback_location)
         callback_params = parse_qs(callback_url.query)
         authorization_code = callback_params.get("code", [""])[0]
         returned_state = callback_params.get("state", [""])[0]
         if not authorization_code or returned_state != expected_state:
             raise SystemExit("Consent callback did not return the expected code and state.")
-        print("Consent callback: OK")
+        print(f"Consent callback: OK (HTTP {consent_response.status_code})")
 
         duplicate_response = client.post(
             "/oauth/consent",
@@ -116,9 +117,13 @@ def main() -> int:
                 "action": "approve",
             },
         )
-        if duplicate_response.status_code != 409 or "Authorization already completed" not in duplicate_response.text:
-            raise SystemExit("Duplicate consent submission was not handled explicitly.")
-        print("Duplicate consent: OK")
+        if duplicate_response.status_code not in {302, 303}:
+            raise SystemExit(
+                f"Duplicate consent did not retry the callback: HTTP {duplicate_response.status_code}"
+            )
+        if duplicate_response.headers.get("location", "") != callback_location:
+            raise SystemExit("Duplicate consent did not return the same callback URL.")
+        print(f"Duplicate consent redirect: OK (HTTP {duplicate_response.status_code})")
 
         token_response = client.post(
             "/token",
