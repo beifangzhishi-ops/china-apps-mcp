@@ -19,7 +19,11 @@ from starlette.routing import Mount, Route
 
 from . import __version__
 from .adapters.bilibili import register_bilibili_tools
-from .adapters.browser import register_browser_tools
+from .adapters.browser import (
+    register_browser_tools,
+    start_browser_bridge,
+    stop_browser_bridge,
+)
 from .oauth import LocalOAuthProvider, oauth_resource_metadata
 
 load_dotenv()
@@ -138,8 +142,6 @@ if oauth_provider is not None:
             headers={"Cache-Control": "no-store"},
         )
 
-    # mcp 1.x advertises resource_server_url + '/.well-known/oauth-protected-resource'.
-    # Keep that compatibility path and the RFC 9728 path-derived form as aliases.
     mcp.custom_route(
         "/mcp/.well-known/oauth-protected-resource",
         methods=["GET", "OPTIONS"],
@@ -201,8 +203,12 @@ else:
 
 @asynccontextmanager
 async def lifespan(_: Starlette):
-    async with mcp.session_manager.run():
-        yield
+    await start_browser_bridge()
+    try:
+        async with mcp.session_manager.run():
+            yield
+    finally:
+        await stop_browser_bridge()
 
 
 app = Starlette(
