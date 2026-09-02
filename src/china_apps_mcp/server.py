@@ -18,7 +18,6 @@ from starlette.responses import JSONResponse
 from starlette.routing import Mount, Route
 
 from . import __version__
-from .adapters.bilibili import register_bilibili_tools
 from .adapters.browser import (
     register_browser_tools,
     start_browser_bridge,
@@ -117,7 +116,6 @@ async def gateway_ping() -> dict[str, Any]:
     }
 
 
-register_bilibili_tools(mcp)
 register_browser_tools(mcp)
 
 
