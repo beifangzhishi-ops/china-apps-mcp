@@ -1,6 +1,6 @@
 # China Apps MCP Gateway
 
-A personal Streamable HTTP MCP gateway for exposing read-only China-app integrations to ChatGPT while the Python service stays on a Windows machine.
+A personal Streamable HTTP MCP gateway that lets ChatGPT read approved pages from the user's normal Microsoft Edge session while the Python service stays on a Windows machine.
 
 ## Architecture
 
@@ -13,8 +13,6 @@ Tailscale Funnel
     |
     v
 127.0.0.1:8765  China Apps MCP
-    |
-    +-- Bilibili adapter
     |
     +-- browser_* tools
             |
@@ -30,16 +28,15 @@ Tailscale Funnel
   normal Microsoft Edge tabs
 ```
 
-Version 0.3 uses a normal Microsoft Edge session. The MCP no longer launches Chrome/Edge, no longer uses Playwright/CDP, does not require `--remote-debugging-port`, and does not maintain a separate browser profile.
+Version 0.3 uses a normal Microsoft Edge session. The MCP does not launch Chrome/Edge, does not use Playwright/CDP, does not require `--remote-debugging-port`, and does not maintain a separate browser profile.
 
 You open Edge normally from the desktop/taskbar and sign in to websites yourself. The unpacked extension reads approved pages from that existing session.
+
+There are no site-specific API adapters or cookie integrations. Public information can be obtained through normal web search; this MCP exists specifically for information that benefits from the user's logged-in browser session.
 
 ## Current MCP tools
 
 - `gateway_ping()`
-- `bilibili_get_video(bvid)`
-- `bilibili_account_status()`
-- `bilibili_get_my_profile()`
 - `browser_status()`
 - `browser_start()` - compatibility/status check; it does not launch Edge
 - `browser_open(url)`
@@ -168,7 +165,7 @@ cookies/
 profiles/
 ```
 
-Version 0.3 does not use `profiles/` for the browser bridge; the ignore remains for older/local experiments.
+The browser bridge does not use `profiles/`; the ignore remains only for older/local experiments.
 
 ## Repository layout
 
@@ -182,7 +179,6 @@ Version 0.3 does not use `profiles/` for the browser bridge; the ignore remains 
 │  ├─ server.py
 │  ├─ oauth.py
 │  └─ adapters/
-│     ├─ bilibili.py
 │     └─ browser.py
 ├─ scripts/
 ├─ tests/
@@ -195,9 +191,8 @@ Version 0.3 does not use `profiles/` for the browser bridge; the ignore remains 
 
 ## Next milestones
 
-1. Validate the Edge bridge with logged-in Zhihu and Dianping pages.
-2. Improve snapshots for SPA/lazy-loaded pages without adding arbitrary JavaScript execution.
-3. Add semantic read-only adapters such as `zhihu_search`, `dianping_search`, `wechat_read_article`, and `ctrip_search_hotel`.
-4. Keep write actions out of scope until explicit confirmation/scoping is designed.
+1. Improve snapshots for SPA/lazy-loaded pages without adding arbitrary JavaScript execution.
+2. Add browser-only semantic helpers when repeated workflows justify them, while keeping the Edge session as the single source of login state.
+3. Keep write actions out of scope until explicit confirmation/scoping is designed.
 
 See `SECURITY.md` before expanding browser permissions or account-capable tools.
