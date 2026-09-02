@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "china-apps-mcp"
-version = "0.3.1"
+version = "0.3.2"
 description = "Personal MCP browser bridge for logged-in China-app pages, exposed through a local-only service and Tailscale Funnel."
 readme = "README.md"
 requires-python = ">=3.11"
