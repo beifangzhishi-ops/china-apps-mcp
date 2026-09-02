@@ -1,0 +1,40 @@
+{
+  "manifest_version": 3,
+  "name": "China Apps Browser Bridge",
+  "version": "0.3.0",
+  "description": "Read-only bridge between normal Microsoft Edge tabs and the local China Apps MCP gateway.",
+  "permissions": [
+    "tabs",
+    "scripting"
+  ],
+  "host_permissions": [
+    "https://*.taobao.com/*",
+    "https://*.tmall.com/*",
+    "https://*.jd.com/*",
+    "https://*.ctrip.com/*",
+    "https://*.dianping.com/*",
+    "https://*.meituan.com/*",
+    "https://*.zhihu.com/*",
+    "https://*.douyin.com/*",
+    "https://*.qq.com/*",
+    "https://*.weixin.qq.com/*",
+    "https://*.bilibili.com/*",
+    "http://*.taobao.com/*",
+    "http://*.tmall.com/*",
+    "http://*.jd.com/*",
+    "http://*.ctrip.com/*",
+    "http://*.dianping.com/*",
+    "http://*.meituan.com/*",
+    "http://*.zhihu.com/*",
+    "http://*.douyin.com/*",
+    "http://*.qq.com/*",
+    "http://*.weixin.qq.com/*",
+    "http://*.bilibili.com/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_security_policy": {
+    "extension_pages": "script-src 'self'; object-src 'self'; connect-src ws://127.0.0.1:8766"
+  }
+}
