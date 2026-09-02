@@ -8,10 +8,27 @@ This gateway is intended for a personal Windows machine and must remain bound to
 2. Never commit `.env`, `.state/oauth-state.json`, cookies, browser profiles, OAuth tokens, QR-login state, logs containing credentials, or platform session data.
 3. Keep `MCP_ACCESS_TOKEN`, `MCP_OAUTH_APPROVAL_SECRET`, CPA/API keys, and platform credentials separate.
 4. Treat a Funnel URL as public. A random hostname is not authentication.
-5. Use `MCP_AUTH_MODE=oauth` before enabling account cookies or any write-capable platform tools.
-6. `MCP_AUTH_MODE=none` is only for a short connectivity PoC with public/read-only data.
+5. Use `MCP_AUTH_MODE=oauth` before enabling account cookies or browser/account tools on a publicly exposed MCP endpoint.
+6. `MCP_AUTH_MODE=none` is only for short connectivity PoCs.
 7. Start with read-only tools. Add message/comment/publish/delete/moderation actions only after per-tool scopes and explicit confirmation behavior are designed.
 8. Prefer official OAuth/API integrations when a platform offers them. Cookie/browser automation is less stable and can trigger platform risk controls.
+
+## BrowserRuntime boundary
+
+Version 0.2.1 uses an attach-only Chrome model:
+
+- the user starts Chrome manually with a dedicated `--user-data-dir` and a loopback `--remote-debugging-port`;
+- the MCP connects with Playwright `connect_over_cdp()`;
+- the MCP does not launch Chrome and does not inject Playwright's browser-launch default switches;
+- `browser_stop()` detaches MCP without closing the user's Chrome;
+- login state remains only in the ignored local Chrome profile under `profiles/`;
+- navigation and returned page content are restricted to the configured allowlist;
+- a URL supplied to the MCP is checked before navigation and the final URL is checked again after redirects;
+- URL-based reads use a temporary tab so concurrent requests do not navigate each other's tabs or the user's login tabs.
+
+The Chrome DevTools endpoint is a privileged local-control interface. Keep it loopback-only. Never expose the CDP port through Tailscale Funnel, Windows Firewall, LAN port forwarding, or a public reverse proxy.
+
+Attaching through CDP does not make browser automation invisible. Sites can still use behavioral, browser, account, network, or other signals and may trigger risk controls.
 
 ## OAuth model
 
@@ -36,13 +53,13 @@ This means routes such as `/health`, `/.well-known/...`, `/authorize`, `/token`,
 
 The disable script removes only the root and `/mcp` routes owned by this gateway. Do not use `tailscale funnel reset` unless you also intend to remove unrelated routes such as CPA `/v1`.
 
-## Current PoC boundary
+## Current read-only boundary
 
-Version 0.1 exposes only:
+The gateway currently includes:
 
-- `gateway_ping`
-- `bilibili_get_video` (public metadata)
-- `bilibili_account_status` (boolean only)
-- `bilibili_get_my_profile` (read-only; requires an optional local cookie)
+- connectivity and Bilibili read-only tools;
+- BrowserRuntime status/attach/tab/read tools;
+- no generic arbitrary-JavaScript execution tool;
+- no browser click/fill/submit/payment tool.
 
-The Bilibili cookie is read from the local process environment and is never returned by any tool.
+Browser tools can still read information from logged-in accounts on allowed sites, so treat them as account-capable tools even though they do not submit writes.
