@@ -316,16 +316,16 @@ class BrowserRuntime:
         pages: list[dict[str, Any]] = []
         for index, page in enumerate(context.pages):
             try:
+                _validated_url(page.url)
+            except ValueError:
+                pages.append({"index": index, "allowed": False})
+                continue
+
+            try:
                 title = await page.title()
             except Exception:
                 title = ""
-            allowed = False
-            try:
-                _validated_url(page.url)
-                allowed = True
-            except ValueError:
-                pass
-            pages.append({"index": index, "title": title, "url": page.url, "allowed": allowed})
+            pages.append({"index": index, "title": title, "url": page.url, "allowed": True})
         return {"pages": pages}
 
     async def stop(self) -> dict[str, Any]:
@@ -360,7 +360,7 @@ def register_browser_tools(mcp: Any) -> None:
 
     @mcp.tool()
     async def browser_list_pages() -> dict[str, Any]:
-        """List Chrome tabs and mark whether each tab is on an MCP-allowed host."""
+        """List Chrome tabs; details are returned only for tabs on MCP-allowed hosts."""
         return await _runtime.list_pages()
 
     @mcp.tool()
