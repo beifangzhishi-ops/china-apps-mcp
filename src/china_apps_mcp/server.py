@@ -19,6 +19,7 @@ from starlette.routing import Mount, Route
 
 from . import __version__
 from .adapters.bilibili import register_bilibili_tools
+from .adapters.browser import register_browser_tools
 from .oauth import LocalOAuthProvider, oauth_resource_metadata
 
 load_dotenv()
@@ -113,6 +114,7 @@ async def gateway_ping() -> dict[str, Any]:
 
 
 register_bilibili_tools(mcp)
+register_browser_tools(mcp)
 
 
 if oauth_provider is not None:
