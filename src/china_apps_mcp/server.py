@@ -43,6 +43,11 @@ def _csv_env(name: str) -> list[str]:
     return [item.strip() for item in os.getenv(name, "").split(",") if item.strip()]
 
 
+def _constant_time_text_equal(candidate: str, expected: str) -> bool:
+    """Compare arbitrary Unicode text without compare_digest() ASCII failures."""
+    return hmac.compare_digest(candidate.encode("utf-8"), expected.encode("utf-8"))
+
+
 _allowed_hosts = ["127.0.0.1:*", "localhost:*", "[::1]:*"]
 for _host in _csv_env("MCP_ALLOWED_HOSTS"):
     _allowed_hosts.append(_host)
@@ -160,7 +165,7 @@ class BearerAuthMiddleware:
         prefix = "Bearer "
         candidate = raw[len(prefix):] if raw.startswith(prefix) else ""
 
-        if not candidate or not hmac.compare_digest(candidate, self.token):
+        if not candidate or not _constant_time_text_equal(candidate, self.token):
             response = JSONResponse(
                 {"error": "unauthorized"},
                 status_code=401,
@@ -212,6 +217,8 @@ def main() -> None:
         raise RuntimeError(
             "MCP_HOST must remain loopback-only. Use Tailscale Funnel for public HTTPS exposure."
         )
+    if not 1 <= PORT <= 65535:
+        raise RuntimeError("MCP_PORT must be between 1 and 65535")
     if AUTH_MODE == "token" and not ACCESS_TOKEN:
         raise RuntimeError("MCP_ACCESS_TOKEN is required when MCP_AUTH_MODE=token")
 

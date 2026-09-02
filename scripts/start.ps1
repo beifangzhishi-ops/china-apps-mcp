@@ -55,6 +55,25 @@ function New-CompatibleVenv {
     throw "Python 3.11+ was not found. Install Python 3.11, 3.12, 3.13, or 3.14, then run this script again."
 }
 
+function Get-McpPort {
+    param([Parameter(Mandatory = $true)][string]$EnvPath)
+
+    $port = 8765
+    if (Test-Path -LiteralPath $EnvPath) {
+        foreach ($line in [IO.File]::ReadAllLines($EnvPath)) {
+            if ($line -match '^\s*MCP_PORT\s*=\s*([0-9]+)\s*(?:#.*)?$') {
+                $port = [int]$matches[1]
+                break
+            }
+        }
+    }
+
+    if ($port -lt 1 -or $port -gt 65535) {
+        throw "MCP_PORT must be between 1 and 65535."
+    }
+    return $port
+}
+
 function Normalize-LoopbackProxy {
     foreach ($name in @("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY")) {
         $value = [Environment]::GetEnvironmentVariable($name, "Process")
@@ -73,6 +92,10 @@ if (-not (Test-Path -LiteralPath ".env")) {
 }
 
 Normalize-LoopbackProxy
+
+$port = Get-McpPort -EnvPath (Join-Path $repoRoot ".env")
+$healthUrl = "http://127.0.0.1:$port/health"
+$mcpUrl = "http://127.0.0.1:$port/mcp"
 
 if (Test-Path -LiteralPath $venvPython) {
     if (-not (Test-Python311 -FilePath $venvPython)) {
@@ -93,19 +116,50 @@ $pythonVersion = (& $venvPython -c "import sys; print('.'.join(map(str, sys.vers
 Write-Output "Using Python $pythonVersion"
 
 if (-not $SkipInstall) {
+    # Do not force a pip self-upgrade on every start. The venv-bundled pip is
+    # sufficient to install this project and avoids an unnecessary network step.
     & $venvPython -m pip install --disable-pip-version-check -e .
     if ($LASTEXITCODE -ne 0) {
+        Write-Output "Dependency installation failed."
+        Write-Output "If FlClash is used as a local HTTP proxy, use http://127.0.0.1:<port>, not https://127.0.0.1:<port>."
         throw "Dependency installation failed."
     }
 }
 
 if (-not $Background) {
+    Write-Output "Starting China Apps MCP on http://127.0.0.1:$port"
+    Write-Output "Health: $healthUrl"
+    Write-Output "MCP:    $mcpUrl"
     & $venvPython -m china_apps_mcp
     exit $LASTEXITCODE
 }
 
 New-Item -ItemType Directory -Force -Path $stateDir | Out-Null
 New-Item -ItemType Directory -Force -Path $logsDir | Out-Null
+
+# Refuse to launch a second process onto the configured port. If the existing
+# listener is this gateway, repair the PID file and report it as already running.
+$existingListener = Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue |
+    Where-Object { $_.LocalAddress -in @("127.0.0.1", "::1") } |
+    Select-Object -First 1
+
+if ($null -ne $existingListener) {
+    $existingPid = [int]$existingListener.OwningProcess
+    $existingCim = Get-CimInstance Win32_Process -Filter "ProcessId = $existingPid" -ErrorAction SilentlyContinue
+    if ($null -ne $existingCim -and $existingCim.CommandLine -and $existingCim.CommandLine -match "china_apps_mcp") {
+        Set-Content -LiteralPath $pidFile -Value ([string]$existingPid) -Encoding ASCII
+        Write-Output "China Apps MCP is already running. PID=$existingPid"
+        Write-Output "Health: $healthUrl"
+        Write-Output "MCP:    $mcpUrl"
+        exit 0
+    }
+
+    throw "Port $port is already in use by PID=$existingPid. Refusing to start China Apps MCP."
+}
+
+# A PID file without a matching listener is stale. Never trust it by itself:
+# Windows may have already reused that PID for an unrelated process.
+Remove-Item -LiteralPath $pidFile -Force -ErrorAction SilentlyContinue
 
 $process = Start-Process `
     -FilePath $venvPython `
@@ -119,33 +173,66 @@ $process = Start-Process `
 $healthy = $false
 for ($i = 0; $i -lt 30; $i++) {
     Start-Sleep -Milliseconds 500
+
     try {
-        $response = Invoke-WebRequest -UseBasicParsing -Uri "http://127.0.0.1:8765/health" -TimeoutSec 2
+        $response = Invoke-WebRequest -UseBasicParsing -Uri $healthUrl -TimeoutSec 2
         if ($response.StatusCode -eq 200) {
             $healthy = $true
             break
         }
     }
-    catch {}
+    catch {
+        # Keep waiting. The venv launcher PID may exit after spawning the real
+        # interpreter, so health/listener state is authoritative here.
+    }
 }
 
 if (-not $healthy) {
-    if (-not $process.HasExited) { Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue }
+    if (-not $process.HasExited) {
+        Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+    }
+
+    $failedListener = Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue |
+        Where-Object { $_.LocalAddress -in @("127.0.0.1", "::1") } |
+        Select-Object -First 1
+    if ($null -ne $failedListener) {
+        $failedPid = [int]$failedListener.OwningProcess
+        $failedCim = Get-CimInstance Win32_Process -Filter "ProcessId = $failedPid" -ErrorAction SilentlyContinue
+        if ($null -ne $failedCim -and $failedCim.CommandLine -and $failedCim.CommandLine -match "china_apps_mcp") {
+            Stop-Process -Id $failedPid -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    Remove-Item -LiteralPath $pidFile -Force -ErrorAction SilentlyContinue
     throw "China Apps MCP failed to become healthy. Check logs\gateway.err.log."
 }
 
-$listenerPid = (
-    Get-NetTCPConnection -LocalPort 8765 -State Listen -ErrorAction SilentlyContinue |
-    Select-Object -First 1 -ExpandProperty OwningProcess
-)
+$listener = Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue |
+    Where-Object { $_.LocalAddress -in @("127.0.0.1", "::1") } |
+    Select-Object -First 1
 
-if (-not $listenerPid) {
-    throw "MCP listener PID was not found."
+if ($null -eq $listener) {
+    if (-not $process.HasExited) {
+        Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+    }
+    throw "MCP became healthy but no loopback listener PID was found on port $port."
+}
+
+$listenerPid = [int]$listener.OwningProcess
+$listenerCim = Get-CimInstance Win32_Process -Filter "ProcessId = $listenerPid" -ErrorAction SilentlyContinue
+if ($null -eq $listenerCim -or -not $listenerCim.CommandLine -or $listenerCim.CommandLine -notmatch "china_apps_mcp") {
+    if (-not $process.HasExited) {
+        Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+    }
+    throw "The listener on port $port is not a verified china_apps_mcp process."
 }
 
 Set-Content -LiteralPath $pidFile -Value ([string]$listenerPid) -Encoding ASCII
 
 Write-Output "China Apps MCP started in background. PID=$listenerPid"
-Write-Output "Health: http://127.0.0.1:8765/health"
-Write-Output "MCP:    http://127.0.0.1:8765/mcp"
+if ($process.Id -ne $listenerPid) {
+    Write-Output "Launcher PID=$($process.Id); listener PID=$listenerPid"
+}
+Write-Output "Health: $healthUrl"
+Write-Output "MCP:    $mcpUrl"
 exit 0

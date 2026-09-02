@@ -5,6 +5,20 @@ $ErrorActionPreference = "Stop"
 $repoRoot = Split-Path -Parent $PSScriptRoot
 $stateDir = Join-Path $repoRoot ".state"
 $pidFile = Join-Path $stateDir "mcp.pid"
+$envPath = Join-Path $repoRoot ".env"
+
+$port = 8765
+if (Test-Path -LiteralPath $envPath) {
+    foreach ($line in [IO.File]::ReadAllLines($envPath)) {
+        if ($line -match '^\s*MCP_PORT\s*=\s*([0-9]+)\s*(?:#.*)?$') {
+            $port = [int]$matches[1]
+            break
+        }
+    }
+}
+if ($port -lt 1 -or $port -gt 65535) {
+    throw "MCP_PORT must be between 1 and 65535."
+}
 
 if (-not (Test-Path -LiteralPath $pidFile)) {
     Write-Output "China Apps MCP is not running (PID file not found)."
@@ -25,8 +39,19 @@ if ($null -eq $process) {
 }
 
 $cim = Get-CimInstance Win32_Process -Filter "ProcessId = $targetPid" -ErrorAction SilentlyContinue
-if ($null -ne $cim -and $cim.CommandLine -and $cim.CommandLine -notmatch "china_apps_mcp") {
-    throw "Refusing to stop PID $targetPid because its command line does not contain china_apps_mcp."
+if ($null -eq $cim -or -not $cim.CommandLine -or $cim.CommandLine -notmatch "china_apps_mcp") {
+    throw "Refusing to stop PID $targetPid because it is not a verified china_apps_mcp process."
+}
+
+$listener = Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue |
+    Where-Object {
+        $_.OwningProcess -eq $targetPid -and
+        $_.LocalAddress -in @("127.0.0.1", "::1")
+    } |
+    Select-Object -First 1
+
+if ($null -eq $listener) {
+    throw "Refusing to stop PID $targetPid because it is not the loopback listener on MCP_PORT=$port."
 }
 
 Stop-Process -Id $targetPid -Force
