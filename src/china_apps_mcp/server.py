@@ -17,7 +17,7 @@ from mcp.server.transport_security import TransportSecuritySettings
 from pydantic import AnyHttpUrl
 from starlette.applications import Starlette
 from starlette.requests import Request
-from starlette.responses import JSONResponse, Response
+from starlette.responses import JSONResponse, RedirectResponse, Response
 from starlette.routing import Mount, Route
 
 from . import __version__
@@ -105,6 +105,20 @@ def _allow_consent_submit_script(response: Response) -> Response:
             f"{csp.rstrip('; ')}; script-src {CONSENT_SUBMIT_SCRIPT_CSP}"
         )
     return response
+
+
+def _retry_completed_consent(request_id: str) -> RedirectResponse | None:
+    """Replay a completed consent callback instead of returning a terminal 409 page."""
+    if oauth_provider is None:
+        return None
+    completed = oauth_provider.completed_consents.get(request_id)
+    if completed is None:
+        return None
+    return RedirectResponse(
+        completed.redirect_url,
+        status_code=303,
+        headers={"Cache-Control": "no-store"},
+    )
 
 
 async def _log_consent_post(request: Request) -> None:
@@ -224,12 +238,38 @@ if oauth_provider is not None:
     @mcp.custom_route("/oauth/consent", methods=["POST"])
     async def oauth_consent_post(request: Request):
         await _log_consent_post(request)
+        body = (await request.body()).decode("utf-8", errors="replace")
+        form = parse_qs(body, keep_blank_values=True)
+        request_id = form.get("request", [""])[0]
+
+        retry = _retry_completed_consent(request_id)
+        if retry is not None:
+            if OAUTH_DEBUG_LOG_SECRETS:
+                _append_oauth_debug(
+                    {
+                        "event": "consent_post_retry_redirect",
+                        **_request_peer(request),
+                        "request_id": request_id,
+                        "status_code": retry.status_code,
+                        "location": retry.headers.get("location", ""),
+                    }
+                )
+            return retry
+
         response = await oauth_provider.consent_post(request)
+        location = response.headers.get("location", "")
+        if location and response.status_code in {301, 302, 307, 308}:
+            response = RedirectResponse(
+                location,
+                status_code=303,
+                headers={"Cache-Control": "no-store"},
+            )
         if OAUTH_DEBUG_LOG_SECRETS:
             _append_oauth_debug(
                 {
                     "event": "consent_post_result",
                     **_request_peer(request),
+                    "request_id": request_id,
                     "status_code": response.status_code,
                     "location": response.headers.get("location", ""),
                 }
