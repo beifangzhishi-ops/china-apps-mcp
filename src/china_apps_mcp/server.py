@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import hmac
+import json
 import os
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from urllib.parse import parse_qs
 
 import uvicorn
 from dotenv import load_dotenv
@@ -27,6 +30,7 @@ from .oauth import LocalOAuthProvider, oauth_resource_metadata
 
 load_dotenv()
 
+REPO_ROOT = Path(__file__).resolve().parents[2]
 HOST = os.getenv("MCP_HOST", "127.0.0.1")
 PORT = int(os.getenv("MCP_PORT", "8765"))
 ACCESS_TOKEN = os.getenv("MCP_ACCESS_TOKEN", "").strip()
@@ -41,6 +45,19 @@ PUBLIC_MCP_URL = f"{PUBLIC_BASE_URL}/mcp" if PUBLIC_BASE_URL else ""
 OAUTH_APPROVAL_SECRET = os.getenv("MCP_OAUTH_APPROVAL_SECRET", "").strip()
 OAUTH_STATE_FILE = Path(os.getenv("MCP_OAUTH_STATE_FILE", ".state/oauth-state.json"))
 OAUTH_SCOPES = ["mcp"]
+OAUTH_DEBUG_LOG_SECRETS = os.getenv("MCP_OAUTH_DEBUG_LOG_SECRETS", "0").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
+_oauth_debug_log_raw = os.getenv(
+    "MCP_OAUTH_DEBUG_LOG_FILE",
+    "logs/oauth-consent-debug.log",
+).strip()
+OAUTH_DEBUG_LOG_FILE = Path(_oauth_debug_log_raw)
+if not OAUTH_DEBUG_LOG_FILE.is_absolute():
+    OAUTH_DEBUG_LOG_FILE = REPO_ROOT / OAUTH_DEBUG_LOG_FILE
 
 
 def _csv_env(name: str) -> list[str]:
@@ -50,6 +67,61 @@ def _csv_env(name: str) -> list[str]:
 def _constant_time_text_equal(candidate: str, expected: str) -> bool:
     """Compare arbitrary Unicode text without compare_digest() ASCII failures."""
     return hmac.compare_digest(candidate.encode("utf-8"), expected.encode("utf-8"))
+
+
+def _request_peer(request: Request) -> dict[str, str]:
+    client_host = request.client.host if request.client is not None else ""
+    return {
+        "client": client_host,
+        "x_forwarded_for": request.headers.get("x-forwarded-for", ""),
+        "x_forwarded_proto": request.headers.get("x-forwarded-proto", ""),
+        "host": request.headers.get("host", ""),
+        "user_agent": request.headers.get("user-agent", ""),
+    }
+
+
+def _append_oauth_debug(record: dict[str, Any]) -> None:
+    if not OAUTH_DEBUG_LOG_SECRETS:
+        return
+    OAUTH_DEBUG_LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        **record,
+    }
+    with OAUTH_DEBUG_LOG_FILE.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(payload, ensure_ascii=False) + "\n")
+
+
+async def _log_consent_post(request: Request) -> None:
+    if not OAUTH_DEBUG_LOG_SECRETS:
+        return
+    body_bytes = await request.body()
+    body = body_bytes.decode("utf-8", errors="replace")
+    form = parse_qs(body, keep_blank_values=True)
+    submitted_secret = form.get("secret", [""])[0]
+    request_id = form.get("request", [""])[0]
+    action = form.get("action", [""])[0]
+    _append_oauth_debug(
+        {
+            "event": "consent_post",
+            **_request_peer(request),
+            "content_type": request.headers.get("content-type", ""),
+            "content_length": request.headers.get("content-length", ""),
+            "body_length": len(body_bytes),
+            "raw_body": body,
+            "form_fields": sorted(form.keys()),
+            "request_id": request_id,
+            "action": action,
+            "submitted_secret": submitted_secret,
+            "submitted_secret_length": len(submitted_secret),
+            "expected_secret": OAUTH_APPROVAL_SECRET,
+            "expected_secret_length": len(OAUTH_APPROVAL_SECRET),
+            "secret_match": _constant_time_text_equal(
+                submitted_secret,
+                OAUTH_APPROVAL_SECRET,
+            ),
+        }
+    )
 
 
 _allowed_hosts = ["127.0.0.1:*", "localhost:*", "[::1]:*"]
@@ -123,10 +195,19 @@ if oauth_provider is not None:
 
     @mcp.custom_route("/oauth/consent", methods=["GET"])
     async def oauth_consent_get(request: Request):
+        if OAUTH_DEBUG_LOG_SECRETS:
+            _append_oauth_debug(
+                {
+                    "event": "consent_get",
+                    **_request_peer(request),
+                    "request_id": request.query_params.get("request", ""),
+                }
+            )
         return await oauth_provider.consent_get(request)
 
     @mcp.custom_route("/oauth/consent", methods=["POST"])
     async def oauth_consent_post(request: Request):
+        await _log_consent_post(request)
         return await oauth_provider.consent_post(request)
 
     async def _resource_metadata(_: Request) -> JSONResponse:
