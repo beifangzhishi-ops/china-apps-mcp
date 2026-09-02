@@ -8,7 +8,7 @@ This gateway is intended for one user's Windows machine. The MCP service stays b
 2. Treat a Funnel URL as public. Use OAuth before exposing tools that can read logged-in account data.
 3. Never commit `.env`, `.state`, cookies, OAuth tokens, browser credentials, or logs containing secrets.
 4. Keep browser capabilities read-oriented. Do not add purchase, publish, message, delete, moderation, or arbitrary JavaScript execution without a separate permission/confirmation design.
-5. Prefer official APIs when a site offers an appropriate stable API. Browser extraction is a fallback and may trigger site risk controls.
+5. Keep this MCP browser-only. Public information should use normal web search; do not add site-specific API adapters, exported-cookie integrations, or a second account-state mechanism.
 
 ## Edge browser bridge (0.3+)
 
@@ -62,4 +62,4 @@ Version 0.3 exposes browser tools for:
 - reading visible text and links from an allowed page
 - temporary-tab reads
 
-There is no generic JavaScript execution, direct cookie export, password access, form submission, purchasing, commenting, messaging, publishing, or delete operation.
+There are no site-specific account adapters, exported-cookie tools, generic JavaScript execution, direct cookie export, password access, form submission, purchasing, commenting, messaging, publishing, or delete operations.
