@@ -74,6 +74,32 @@ function Get-McpPort {
     return $port
 }
 
+function Get-LoopbackListenerPid {
+    param([Parameter(Mandatory = $true)][int]$Port)
+
+    $connection = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue |
+        Where-Object { $_.LocalAddress -in @("127.0.0.1", "::1") } |
+        Select-Object -First 1
+    if ($null -ne $connection) {
+        return [int]$connection.OwningProcess
+    }
+
+    # Get-NetTCPConnection may return no rows in restricted shells even when
+    # netstat can see the listener. Keep launch checks fail-safe in that case.
+    $netstat = Join-Path $env:SystemRoot "System32\netstat.exe"
+    foreach ($line in (& $netstat -ano -p TCP 2>$null)) {
+        if ($line -notmatch '^\s*TCP\s+(\S+):([0-9]+)\s+\S+\s+LISTENING\s+([0-9]+)\s*$') {
+            continue
+        }
+        $localAddress = $matches[1] -replace '^\[|\]$', ''
+        if ([int]$matches[2] -eq $Port -and $localAddress -in @("127.0.0.1", "::1")) {
+            return [int]$matches[3]
+        }
+    }
+
+    return $null
+}
+
 function Normalize-LoopbackProxy {
     foreach ($name in @("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY")) {
         $value = [Environment]::GetEnvironmentVariable($name, "Process")
@@ -139,12 +165,10 @@ New-Item -ItemType Directory -Force -Path $logsDir | Out-Null
 
 # Refuse to launch a second process onto the configured port. If the existing
 # listener is this gateway, repair the PID file and report it as already running.
-$existingListener = Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue |
-    Where-Object { $_.LocalAddress -in @("127.0.0.1", "::1") } |
-    Select-Object -First 1
+$existingPid = Get-LoopbackListenerPid -Port $port
 
-if ($null -ne $existingListener) {
-    $existingPid = [int]$existingListener.OwningProcess
+if ($null -ne $existingPid) {
+    $existingPid = [int]$existingPid
     $existingCim = Get-CimInstance Win32_Process -Filter "ProcessId = $existingPid" -ErrorAction SilentlyContinue
     if ($null -ne $existingCim -and $existingCim.CommandLine -and $existingCim.CommandLine -match "china_apps_mcp") {
         Set-Content -LiteralPath $pidFile -Value ([string]$existingPid) -Encoding ASCII
@@ -192,11 +216,9 @@ if (-not $healthy) {
         Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
     }
 
-    $failedListener = Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue |
-        Where-Object { $_.LocalAddress -in @("127.0.0.1", "::1") } |
-        Select-Object -First 1
-    if ($null -ne $failedListener) {
-        $failedPid = [int]$failedListener.OwningProcess
+    $failedPid = Get-LoopbackListenerPid -Port $port
+    if ($null -ne $failedPid) {
+        $failedPid = [int]$failedPid
         $failedCim = Get-CimInstance Win32_Process -Filter "ProcessId = $failedPid" -ErrorAction SilentlyContinue
         if ($null -ne $failedCim -and $failedCim.CommandLine -and $failedCim.CommandLine -match "china_apps_mcp") {
             Stop-Process -Id $failedPid -Force -ErrorAction SilentlyContinue
@@ -207,18 +229,16 @@ if (-not $healthy) {
     throw "China Apps MCP failed to become healthy. Check logs\gateway.err.log."
 }
 
-$listener = Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue |
-    Where-Object { $_.LocalAddress -in @("127.0.0.1", "::1") } |
-    Select-Object -First 1
+$listenerPid = Get-LoopbackListenerPid -Port $port
 
-if ($null -eq $listener) {
+if ($null -eq $listenerPid) {
     if (-not $process.HasExited) {
         Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
     }
     throw "MCP became healthy but no loopback listener PID was found on port $port."
 }
 
-$listenerPid = [int]$listener.OwningProcess
+$listenerPid = [int]$listenerPid
 $listenerCim = Get-CimInstance Win32_Process -Filter "ProcessId = $listenerPid" -ErrorAction SilentlyContinue
 if ($null -eq $listenerCim -or -not $listenerCim.CommandLine -or $listenerCim.CommandLine -notmatch "china_apps_mcp") {
     if (-not $process.HasExited) {

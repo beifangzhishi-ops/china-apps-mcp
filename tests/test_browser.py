@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import asyncio
 import inspect
+import json
 import unittest
+from types import SimpleNamespace
 
 from china_apps_mcp.adapters.browser import (
     BrowserBridge,
@@ -62,6 +65,60 @@ class EdgeBridgeArchitectureTests(unittest.TestCase):
         self.assertNotIn("playwright", source.lower())
         self.assertNotIn("connect_over_cdp", source)
         self.assertNotIn("remote-debugging", source)
+
+
+class _FakeWebSocket:
+    def __init__(self, first_message: dict[str, object]) -> None:
+        self.request = SimpleNamespace(headers={"Origin": "chrome-extension://test-id"})
+        self.first_message = json.dumps(first_message)
+        self.closed: tuple[int, str] | None = None
+        self.release = asyncio.Event()
+
+    async def recv(self) -> str:
+        return self.first_message
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        await self.release.wait()
+        raise StopAsyncIteration
+
+    async def close(self, code: int, reason: str) -> None:
+        self.closed = (code, reason)
+        self.release.set()
+
+
+class EdgeBridgeHandshakeTests(unittest.IsolatedAsyncioTestCase):
+    async def test_non_hello_socket_never_becomes_extension_connection(self) -> None:
+        bridge = BrowserBridge()
+        websocket = _FakeWebSocket({"type": "heartbeat"})
+
+        await bridge._handle_connection(websocket)  # type: ignore[arg-type]
+
+        self.assertFalse(bridge.connected)
+        self.assertEqual(websocket.closed, (1008, "Initial extension hello required"))
+
+    async def test_hello_is_required_before_connection_is_published(self) -> None:
+        bridge = BrowserBridge()
+        websocket = _FakeWebSocket(
+            {"type": "hello", "version": "0.3.1", "browser": "edge"}
+        )
+
+        task = asyncio.create_task(
+            bridge._handle_connection(websocket)  # type: ignore[arg-type]
+        )
+        await asyncio.sleep(0)
+
+        self.assertTrue(bridge.connected)
+        self.assertEqual(
+            (await bridge.status())["extension"],
+            {"extension_version": "0.3.1", "browser": "edge"},
+        )
+
+        websocket.release.set()
+        await task
+        self.assertFalse(bridge.connected)
 
 
 if __name__ == "__main__":

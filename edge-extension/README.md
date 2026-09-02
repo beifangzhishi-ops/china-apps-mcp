@@ -16,6 +16,8 @@ It does **not** launch Edge, enable remote debugging, use CDP, or create a separ
 
 The extension connects to `ws://127.0.0.1:8766`. The bridge is loopback-only and is separate from the MCP/Tailscale Funnel listener on port 8765.
 
+0.3.1 版本增加了 `alarms` 权限，用于在 Manifest V3 service worker 休眠后唤醒重连。更新扩展文件后，请在 `edge://extensions/` 中点击“重新加载”。
+
 ## Permissions
 
 The extension requests `tabs` and `scripting`, plus host permissions only for the China-app domains listed in `manifest.json`.

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import uuid
 from typing import Any
@@ -27,6 +28,9 @@ _DEFAULT_ALLOWED_HOSTS = (
 _BRIDGE_HOST = "127.0.0.1"
 _BRIDGE_PORT = 8766
 _MAX_BRIDGE_MESSAGE = 2 * 1024 * 1024
+_HELLO_TIMEOUT_SECONDS = 5.0
+
+logger = logging.getLogger(__name__)
 
 
 def _env_flag(name: str, default: bool = False) -> bool:
@@ -164,10 +168,34 @@ class BrowserBridge:
             await websocket.close(code=1008, reason="Extension origin required")
             return
 
+        try:
+            raw_hello = await asyncio.wait_for(
+                websocket.recv(),
+                timeout=_HELLO_TIMEOUT_SECONDS,
+            )
+        except TimeoutError:
+            await websocket.close(code=1008, reason="Extension hello timed out")
+            return
+        except Exception:
+            return
+
+        try:
+            hello = json.loads(raw_hello) if isinstance(raw_hello, str) else None
+        except json.JSONDecodeError:
+            hello = None
+        if not isinstance(hello, dict) or hello.get("type") != "hello":
+            await websocket.close(code=1008, reason="Initial extension hello required")
+            return
+
+        metadata = {
+            "extension_version": str(hello.get("version", ""))[:50],
+            "browser": str(hello.get("browser", ""))[:50],
+        }
+
         async with self._connection_lock:
             previous = self._connection
             self._connection = websocket
-            self._metadata = {}
+            self._metadata = metadata
             self._fail_pending(RuntimeError("Browser extension reconnected"))
 
         if previous is not None and previous is not websocket:
@@ -175,6 +203,12 @@ class BrowserBridge:
                 await previous.close(code=1000, reason="Replaced by newer extension connection")
             except Exception:
                 pass
+
+        logger.info(
+            "Browser extension connected: browser=%s version=%s",
+            metadata["browser"] or "unknown",
+            metadata["extension_version"] or "unknown",
+        )
 
         try:
             async for raw in websocket:
@@ -189,10 +223,12 @@ class BrowserBridge:
 
                 message_type = message.get("type")
                 if message_type == "hello":
-                    self._metadata = {
+                    metadata = {
                         "extension_version": str(message.get("version", ""))[:50],
                         "browser": str(message.get("browser", ""))[:50],
                     }
+                    if self._connection is websocket:
+                        self._metadata = metadata
                     continue
                 if message_type != "response":
                     continue
@@ -214,6 +250,7 @@ class BrowserBridge:
                     self._connection = None
                     self._metadata = {}
                     self._fail_pending(RuntimeError("Browser extension disconnected"))
+                    logger.info("Browser extension disconnected")
 
     async def request(
         self,

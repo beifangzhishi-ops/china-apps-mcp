@@ -1,5 +1,6 @@
 const BRIDGE_URL = "ws://127.0.0.1:8766";
 const EXTENSION_VERSION = chrome.runtime.getManifest().version;
+const RECONNECT_ALARM = "bridge-reconnect";
 
 const ALLOWED_HOSTS = [
   "taobao.com",
@@ -61,11 +62,21 @@ function scheduleReconnect() {
   if (reconnectTimer) {
     return;
   }
+  const delayMs = reconnectDelayMs;
+  chrome.alarms.create(RECONNECT_ALARM, { when: Date.now() + delayMs });
   reconnectTimer = setTimeout(() => {
     reconnectTimer = null;
     connect();
-  }, reconnectDelayMs);
+  }, delayMs);
   reconnectDelayMs = Math.min(reconnectDelayMs * 2, 10000);
+}
+
+function cancelReconnect() {
+  if (reconnectTimer) {
+    clearTimeout(reconnectTimer);
+    reconnectTimer = null;
+  }
+  chrome.alarms.clear(RECONNECT_ALARM);
 }
 
 function startHeartbeat() {
@@ -91,6 +102,7 @@ function connect() {
   }
 
   socket.addEventListener("open", () => {
+    cancelReconnect();
     reconnectDelayMs = 1000;
     send({
       type: "hello",
@@ -311,4 +323,11 @@ async function handleRequest(action, payload) {
 
 chrome.runtime.onInstalled.addListener(() => connect());
 chrome.runtime.onStartup.addListener(() => connect());
+chrome.alarms.onAlarm.addListener((alarm) => {
+  if (alarm.name !== RECONNECT_ALARM) {
+    return;
+  }
+  reconnectTimer = null;
+  connect();
+});
 connect();

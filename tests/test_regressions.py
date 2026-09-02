@@ -204,9 +204,17 @@ class LauncherRegressionTests(unittest.TestCase):
         repo_root = Path(__file__).resolve().parents[1]
         text = (repo_root / "scripts" / "start.ps1").read_text(encoding="utf-8")
         self.assertIn("Get-McpPort", text)
-        self.assertIn("-LocalPort $port", text)
+        self.assertIn("Get-LoopbackListenerPid", text)
+        self.assertIn("netstat.exe", text)
+        self.assertIn("-LocalPort $Port", text)
         self.assertIn("Port $port is already in use", text)
         self.assertIn('Set-Content -LiteralPath $pidFile -Value ([string]$listenerPid)', text)
+
+    def test_stop_script_has_restricted_shell_listener_fallback(self) -> None:
+        repo_root = Path(__file__).resolve().parents[1]
+        text = (repo_root / "scripts" / "stop.ps1").read_text(encoding="utf-8")
+        self.assertIn("Get-LoopbackListenerPid", text)
+        self.assertIn("netstat.exe", text)
 
 
 if __name__ == "__main__":

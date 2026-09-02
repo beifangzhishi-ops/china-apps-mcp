@@ -20,6 +20,30 @@ if ($port -lt 1 -or $port -gt 65535) {
     throw "MCP_PORT must be between 1 and 65535."
 }
 
+function Get-LoopbackListenerPid {
+    param([Parameter(Mandatory = $true)][int]$Port)
+
+    $connection = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue |
+        Where-Object { $_.LocalAddress -in @("127.0.0.1", "::1") } |
+        Select-Object -First 1
+    if ($null -ne $connection) {
+        return [int]$connection.OwningProcess
+    }
+
+    $netstat = Join-Path $env:SystemRoot "System32\netstat.exe"
+    foreach ($line in (& $netstat -ano -p TCP 2>$null)) {
+        if ($line -notmatch '^\s*TCP\s+(\S+):([0-9]+)\s+\S+\s+LISTENING\s+([0-9]+)\s*$') {
+            continue
+        }
+        $localAddress = $matches[1] -replace '^\[|\]$', ''
+        if ([int]$matches[2] -eq $Port -and $localAddress -in @("127.0.0.1", "::1")) {
+            return [int]$matches[3]
+        }
+    }
+
+    return $null
+}
+
 if (-not (Test-Path -LiteralPath $pidFile)) {
     Write-Output "China Apps MCP is not running (PID file not found)."
     exit 0
@@ -43,14 +67,9 @@ if ($null -eq $cim -or -not $cim.CommandLine -or $cim.CommandLine -notmatch "chi
     throw "Refusing to stop PID $targetPid because it is not a verified china_apps_mcp process."
 }
 
-$listener = Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue |
-    Where-Object {
-        $_.OwningProcess -eq $targetPid -and
-        $_.LocalAddress -in @("127.0.0.1", "::1")
-    } |
-    Select-Object -First 1
+$listenerPid = Get-LoopbackListenerPid -Port $port
 
-if ($null -eq $listener) {
+if ($null -eq $listenerPid -or [int]$listenerPid -ne $targetPid) {
     throw "Refusing to stop PID $targetPid because it is not the loopback listener on MCP_PORT=$port."
 }
 

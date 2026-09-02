@@ -104,6 +104,10 @@ Port 8766 is not the public MCP endpoint and should not be exposed through Tails
 
 The extension reconnects to the local bridge automatically. No special Edge shortcut or command-line flags are needed.
 
+扩展 0.3.1 起使用 `chrome.alarms` 在 Manifest V3 service worker 休眠后继续唤醒重连。更新仓库后，需要在 `edge://extensions/` 中对已加载的解压扩展点击一次“重新加载”，使新版 `manifest.json` 和后台脚本生效。
+
+若扩展显示“不活动”，先用 `netstat.exe -ano | findstr ":8766"` 检查本地监听和 `ESTABLISHED` 连接。受限 PowerShell 中 `Get-NetTCPConnection` 可能无输出，不能据此单独判断服务未运行。bridge 只有在客户端发送扩展 `hello` 后才报告 `extension_connected=true`，普通的手动 WebSocket 测试不会再替换真实扩展连接。
+
 See `edge-extension/README.md` for the permission model.
 
 ### Browser allowlist

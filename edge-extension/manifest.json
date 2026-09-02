@@ -1,11 +1,12 @@
 {
   "manifest_version": 3,
   "name": "China Apps Browser Bridge",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Read-only bridge between normal Microsoft Edge tabs and the local China Apps MCP gateway.",
   "permissions": [
     "tabs",
-    "scripting"
+    "scripting",
+    "alarms"
   ],
   "host_permissions": [
     "https://*.taobao.com/*",
