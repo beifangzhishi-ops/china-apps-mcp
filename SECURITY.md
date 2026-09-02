@@ -1,65 +1,65 @@
 # Security model
 
-This gateway is intended for a personal Windows machine and must remain bound to `127.0.0.1`. Public HTTPS exposure is delegated to Tailscale Funnel.
+This gateway is intended for one user's Windows machine. The MCP service stays bound to `127.0.0.1:8765`; Tailscale Funnel provides the remote HTTPS endpoint used by ChatGPT.
 
-## Rules
+## Core rules
 
-1. Never bind the MCP service directly to `0.0.0.0` or open TCP 8765 in Windows Firewall.
-2. Never commit `.env`, `.state/oauth-state.json`, cookies, browser profiles, OAuth tokens, QR-login state, logs containing credentials, or platform session data.
-3. Keep `MCP_ACCESS_TOKEN`, `MCP_OAUTH_APPROVAL_SECRET`, CPA/API keys, and platform credentials separate.
-4. Treat a Funnel URL as public. A random hostname is not authentication.
-5. Use `MCP_AUTH_MODE=oauth` before enabling account cookies or browser/account tools on a publicly exposed MCP endpoint.
-6. `MCP_AUTH_MODE=none` is only for short connectivity PoCs.
-7. Start with read-only tools. Add message/comment/publish/delete/moderation actions only after per-tool scopes and explicit confirmation behavior are designed.
-8. Prefer official OAuth/API integrations when a platform offers them. Cookie/browser automation is less stable and can trigger platform risk controls.
+1. Never bind the MCP service directly to `0.0.0.0` or expose TCP 8765/8766 in Windows Firewall.
+2. Treat a Funnel URL as public. Use OAuth before exposing tools that can read logged-in account data.
+3. Never commit `.env`, `.state`, cookies, OAuth tokens, browser credentials, or logs containing secrets.
+4. Keep browser capabilities read-oriented. Do not add purchase, publish, message, delete, moderation, or arbitrary JavaScript execution without a separate permission/confirmation design.
+5. Prefer official APIs when a site offers an appropriate stable API. Browser extraction is a fallback and may trigger site risk controls.
 
-## BrowserRuntime boundary
+## Edge browser bridge (0.3+)
 
-Version 0.2.1 uses an attach-only Chrome model:
+The browser bridge is deliberately separate from the public MCP HTTP listener:
 
-- the user starts Chrome manually with a dedicated `--user-data-dir` and a loopback `--remote-debugging-port`;
-- the MCP connects with Playwright `connect_over_cdp()`;
-- the MCP does not launch Chrome and does not inject Playwright's browser-launch default switches;
-- `browser_stop()` detaches MCP without closing the user's Chrome;
-- login state remains only in the ignored local Chrome profile under `profiles/`;
-- navigation and returned page content are restricted to the configured allowlist;
-- a URL supplied to the MCP is checked before navigation and the final URL is checked again after redirects;
-- URL-based reads use a temporary tab so concurrent requests do not navigate each other's tabs or the user's login tabs.
+```text
+Edge extension <-> ws://127.0.0.1:8766 <-> China Apps MCP
+ChatGPT        <-> Funnel / 127.0.0.1:8765 <-> China Apps MCP
+```
 
-The Chrome DevTools endpoint is a privileged local-control interface. Keep it loopback-only. Never expose the CDP port through Tailscale Funnel, Windows Firewall, LAN port forwarding, or a public reverse proxy.
+The extension is loaded into a normal Microsoft Edge profile. It does not launch Edge, enable Chrome DevTools remote debugging, use CDP, or use Playwright.
 
-Attaching through CDP does not make browser automation invisible. Sites can still use behavioral, browser, account, network, or other signals and may trigger risk controls.
+The bridge listener is hard-coded to `127.0.0.1:8766`. Do not add that port to Funnel configuration.
+
+The WebSocket handler rejects browser origins that are not extension origins. A local native process can still connect without an Origin header, so the loopback bridge is not a security boundary against malicious software already running as the same Windows user.
+
+### Browser permissions
+
+The Edge extension requests `tabs` and `scripting`, plus host permissions for a fixed set of China-app domains. It does not request `<all_urls>`.
+
+The extension validates destinations before opening or reading tabs. The MCP independently validates returned page URLs and links again before returning them to ChatGPT.
+
+Tabs outside the allowlist are represented only as blocked tab IDs. Their title, URL, and page text are not returned to the MCP client.
+
+`BROWSER_ALLOWED_HOSTS` only expands the MCP-side allowlist. It does not grant new Edge extension host permissions; changing extension host permissions requires an explicit manifest change/reload.
 
 ## OAuth model
 
 OAuth mode is designed for a single-user personal gateway:
 
 - Authorization Code flow with PKCE S256 is handled by the MCP Python SDK.
-- Dynamic Client Registration is enabled so ChatGPT can register itself.
-- Access tokens expire after one hour.
-- Refresh tokens expire after 30 days and rotate when refreshed.
-- Client registration and long-lived token state are stored only in the ignored `.state/oauth-state.json` file.
-- Short-lived authorization codes and pending approvals stay only in memory.
-- The human approval page requires `MCP_OAUTH_APPROVAL_SECRET` and invalidates a pending request after five failed attempts.
-- The approval page sets no cookies and sends `Cache-Control: no-store`, a restrictive CSP, `Referrer-Policy: no-referrer`, and `X-Content-Type-Options: nosniff`.
+- Dynamic Client Registration is enabled for ChatGPT.
+- OAuth client/token state is stored only in the ignored `.state/oauth-state.json` file.
+- Human approval uses `MCP_OAUTH_APPROVAL_SECRET` on the local approval page.
 
-The approval secret is not an MCP token and should never be sent in chat or passed as a tool argument. Enter it only into the browser approval page served by your own Funnel hostname.
+The approval secret is not an MCP token and should never be sent in chat or passed as a tool argument.
 
-## Funnel exposure
+## No-auth boundary
 
-OAuth requires more than `/mcp`; discovery and authorization endpoints must be reachable on the same HTTPS origin. The Funnel helper therefore adds a root fallback in addition to `/mcp`.
+`MCP_AUTH_MODE=none` is suitable only for connectivity experiments with public/non-account data.
 
-This means routes such as `/health`, `/.well-known/...`, `/authorize`, `/token`, `/register`, `/revoke`, and `/oauth/consent` are Internet-reachable through Funnel. The MCP endpoint itself remains OAuth-protected, and authorization still requires the local approval secret.
+Once `BROWSER_ENABLED=1` is used with logged-in Edge pages, `MCP_AUTH_MODE=oauth` is the intended deployment mode for the remote ChatGPT connection.
 
-The disable script removes only the root and `/mcp` routes owned by this gateway. Do not use `tailscale funnel reset` unless you also intend to remove unrelated routes such as CPA `/v1`.
+## Current browser boundary
 
-## Current read-only boundary
+Version 0.3 exposes browser tools for:
 
-The gateway currently includes:
+- bridge status
+- listing allowed tabs
+- opening an allowed URL
+- reading visible text and links from an allowed page
+- temporary-tab reads
 
-- connectivity and Bilibili read-only tools;
-- BrowserRuntime status/attach/tab/read tools;
-- no generic arbitrary-JavaScript execution tool;
-- no browser click/fill/submit/payment tool.
-
-Browser tools can still read information from logged-in accounts on allowed sites, so treat them as account-capable tools even though they do not submit writes.
+There is no generic JavaScript execution, direct cookie export, password access, form submission, purchasing, commenting, messaging, publishing, or delete operation.
