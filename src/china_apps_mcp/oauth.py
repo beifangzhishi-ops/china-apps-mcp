@@ -16,6 +16,7 @@ from mcp.server.auth.provider import (
     AccessToken,
     AuthorizationCode,
     AuthorizationParams,
+    AuthorizeError,
     OAuthAuthorizationServerProvider,
     RefreshToken,
     TokenError,
@@ -47,6 +48,12 @@ class CompletedConsent:
     redirect_url: str
 
 
+@dataclass(frozen=True)
+class TokenGrant:
+    family_id: str
+    resource: str
+
+
 class LocalOAuthProvider(
     OAuthAuthorizationServerProvider[AuthorizationCode, RefreshToken, AccessToken]
 ):
@@ -66,6 +73,7 @@ class LocalOAuthProvider(
         scopes: list[str] | None = None,
     ) -> None:
         self.public_base_url = public_base_url.rstrip("/")
+        self.public_mcp_url = f"{self.public_base_url}/mcp"
         self.approval_secret = approval_secret
         self.state_file = state_file
         self.scopes = scopes or ["mcp"]
@@ -74,6 +82,7 @@ class LocalOAuthProvider(
         self.codes: dict[str, AuthorizationCode] = {}
         self.access_tokens: dict[str, AccessToken] = {}
         self.refresh_tokens: dict[str, RefreshToken] = {}
+        self.token_grants: dict[str, TokenGrant] = {}
         self.pending: dict[str, PendingAuthorization] = {}
         self.completed_consents: dict[str, CompletedConsent] = {}
         self._load_state()
@@ -88,15 +97,38 @@ class LocalOAuthProvider(
                 for item in raw.get("clients", [])
             }
             now = int(time.time())
-            self.access_tokens = {
+            loaded_access = {
                 item["token"]: AccessToken.model_validate(item)
                 for item in raw.get("access_tokens", [])
-                if item.get("expires_at") is None or int(item["expires_at"]) > now
+                if (item.get("expires_at") is None or int(item["expires_at"]) > now)
+                and item.get("resource") == self.public_mcp_url
             }
-            self.refresh_tokens = {
+            raw_grants = {
+                item["token"]: TokenGrant(
+                    family_id=str(item["family_id"]),
+                    resource=str(item["resource"]),
+                )
+                for item in raw.get("token_grants", [])
+                if item.get("token") and item.get("family_id") and item.get("resource")
+            }
+            loaded_refresh = {
                 item["token"]: RefreshToken.model_validate(item)
                 for item in raw.get("refresh_tokens", [])
-                if item.get("expires_at") is None or int(item["expires_at"]) > now
+                if (item.get("expires_at") is None or int(item["expires_at"]) > now)
+                and item.get("token") in raw_grants
+                and raw_grants[item["token"]].resource == self.public_mcp_url
+            }
+
+            # Older state files did not persist refresh-token resource/family metadata.
+            # Keep audience-bound access tokens, but intentionally discard legacy
+            # refresh tokens rather than allowing them to mint unbound access tokens.
+            self.access_tokens = loaded_access
+            self.refresh_tokens = loaded_refresh
+            active_tokens = set(self.access_tokens) | set(self.refresh_tokens)
+            self.token_grants = {
+                token: grant
+                for token, grant in raw_grants.items()
+                if token in active_tokens and grant.resource == self.public_mcp_url
             }
         except Exception as exc:
             raise RuntimeError(f"Failed to load OAuth state from {self.state_file}: {exc}") from exc
@@ -107,6 +139,15 @@ class LocalOAuthProvider(
             "clients": [item.model_dump(mode="json") for item in self.clients.values()],
             "access_tokens": [item.model_dump(mode="json") for item in self.access_tokens.values()],
             "refresh_tokens": [item.model_dump(mode="json") for item in self.refresh_tokens.values()],
+            "token_grants": [
+                {
+                    "token": token,
+                    "family_id": grant.family_id,
+                    "resource": grant.resource,
+                }
+                for token, grant in self.token_grants.items()
+                if token in self.access_tokens or token in self.refresh_tokens
+            ],
         }
         tmp = self.state_file.with_suffix(self.state_file.suffix + ".tmp")
         tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -136,10 +177,21 @@ class LocalOAuthProvider(
         client_id: str,
         scopes: list[str],
         resource: str | None,
+        family_id: str | None = None,
     ) -> OAuthToken:
+        if resource != self.public_mcp_url:
+            raise TokenError(
+                "invalid_target",
+                "token resource does not identify this MCP server",
+            )
+
         now = int(time.time())
         access_value = "mcp_at_" + secrets.token_urlsafe(32)
         refresh_value = "mcp_rt_" + secrets.token_urlsafe(40)
+        grant = TokenGrant(
+            family_id=family_id or secrets.token_urlsafe(24),
+            resource=resource,
+        )
         self.access_tokens[access_value] = AccessToken(
             token=access_value,
             client_id=client_id,
@@ -153,6 +205,8 @@ class LocalOAuthProvider(
             scopes=scopes,
             expires_at=now + 30 * 24 * 3600,
         )
+        self.token_grants[access_value] = grant
+        self.token_grants[refresh_value] = grant
         self._save_state()
         return OAuthToken(
             access_token=access_value,
@@ -171,6 +225,12 @@ class LocalOAuthProvider(
 
     async def authorize(self, client: OAuthClientInformationFull, params: AuthorizationParams) -> str:
         self._cleanup_ephemeral()
+        if params.resource != self.public_mcp_url:
+            raise AuthorizeError(
+                "invalid_target",
+                "resource must identify this MCP server",
+            )
+
         request_id = secrets.token_urlsafe(32)
         self.pending[request_id] = PendingAuthorization(
             client_id=client.client_id,
@@ -196,6 +256,8 @@ class LocalOAuthProvider(
         code = self.codes.get(authorization_code)
         if code is None or code.client_id != client.client_id:
             return None
+        if code.resource != self.public_mcp_url:
+            return None
         return code
 
     async def exchange_authorization_code(
@@ -212,6 +274,8 @@ class LocalOAuthProvider(
                 client.client_id,
             )
             raise TokenError("invalid_grant", "authorization code is invalid or already used")
+        if current.resource != self.public_mcp_url:
+            raise TokenError("invalid_target", "authorization code has an invalid resource")
         try:
             token = self._mint_token_pair(
                 client_id=current.client_id,
@@ -238,6 +302,12 @@ class LocalOAuthProvider(
             return None
         if item.expires_at is not None and item.expires_at <= int(time.time()):
             self.access_tokens.pop(token, None)
+            self.token_grants.pop(token, None)
+            self._save_state()
+            return None
+        if item.resource != self.public_mcp_url:
+            self.access_tokens.pop(token, None)
+            self.token_grants.pop(token, None)
             self._save_state()
             return None
         return item
@@ -248,10 +318,17 @@ class LocalOAuthProvider(
         refresh_token: str,
     ) -> RefreshToken | None:
         item = self.refresh_tokens.get(refresh_token)
+        grant = self.token_grants.get(refresh_token)
         if item is None or item.client_id != client.client_id:
+            return None
+        if grant is None or grant.resource != self.public_mcp_url:
+            self.refresh_tokens.pop(refresh_token, None)
+            self.token_grants.pop(refresh_token, None)
+            self._save_state()
             return None
         if item.expires_at is not None and item.expires_at <= int(time.time()):
             self.refresh_tokens.pop(refresh_token, None)
+            self.token_grants.pop(refresh_token, None)
             self._save_state()
             return None
         return item
@@ -262,22 +339,43 @@ class LocalOAuthProvider(
         refresh_token: RefreshToken,
         scopes: list[str],
     ) -> OAuthToken:
-        current = self.refresh_tokens.pop(refresh_token.token, None)
-        if current is None or current.client_id != client.client_id:
+        current = self.refresh_tokens.get(refresh_token.token)
+        grant = self.token_grants.get(refresh_token.token)
+        if current is None or current.client_id != client.client_id or grant is None:
             raise TokenError("invalid_grant", "refresh token is invalid or already used")
+        if grant.resource != self.public_mcp_url:
+            raise TokenError("invalid_target", "refresh token has an invalid resource")
+
         requested = scopes or current.scopes
         if not set(requested).issubset(set(current.scopes)):
-            self.refresh_tokens[current.token] = current
             raise TokenError("invalid_scope", "requested scope exceeds the original grant")
+
+        self.refresh_tokens.pop(refresh_token.token, None)
+        self.token_grants.pop(refresh_token.token, None)
         return self._mint_token_pair(
             client_id=current.client_id,
             scopes=requested,
-            resource=None,
+            resource=grant.resource,
+            family_id=grant.family_id,
         )
 
     async def revoke_token(self, token: AccessToken | RefreshToken) -> None:
-        self.access_tokens.pop(token.token, None)
-        self.refresh_tokens.pop(token.token, None)
+        grant = self.token_grants.get(token.token)
+        if grant is None:
+            self.access_tokens.pop(token.token, None)
+            self.refresh_tokens.pop(token.token, None)
+            self._save_state()
+            return
+
+        family_tokens = [
+            value
+            for value, candidate in self.token_grants.items()
+            if candidate.family_id == grant.family_id
+        ]
+        for value in family_tokens:
+            self.access_tokens.pop(value, None)
+            self.refresh_tokens.pop(value, None)
+            self.token_grants.pop(value, None)
         self._save_state()
 
     def _page_headers(self) -> dict[str, str]:
