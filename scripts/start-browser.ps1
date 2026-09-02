@@ -7,9 +7,58 @@ param(
 
 $ErrorActionPreference = "Stop"
 $repoRoot = Split-Path -Parent $PSScriptRoot
+$envPath = Join-Path $repoRoot ".env"
+
+function Get-DotEnvValue {
+    param(
+        [Parameter(Mandatory = $true)][string]$Name,
+        [Parameter(Mandatory = $true)][string]$Path
+    )
+
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        return ""
+    }
+
+    foreach ($line in [IO.File]::ReadAllLines($Path)) {
+        if ($line -match ('^\s*' + [Regex]::Escape($Name) + '\s*=\s*(.*?)\s*(?:#.*)?$')) {
+            return $matches[1].Trim().Trim('"').Trim("'")
+        }
+    }
+    return ""
+}
+
+if (-not $PSBoundParameters.ContainsKey("Port")) {
+    $cdpRaw = Get-DotEnvValue -Name "BROWSER_CDP_URL" -Path $envPath
+    if (-not [string]::IsNullOrWhiteSpace($cdpRaw)) {
+        try {
+            $cdpUri = [Uri]$cdpRaw
+        }
+        catch {
+            throw "BROWSER_CDP_URL in .env is not a valid URL: $cdpRaw"
+        }
+        if ($cdpUri.Scheme -ne "http" -or $cdpUri.Host -notin @("127.0.0.1", "localhost", "::1")) {
+            throw "BROWSER_CDP_URL must be a loopback http:// URL."
+        }
+        $Port = $cdpUri.Port
+    }
+}
 
 if ($Port -lt 1 -or $Port -gt 65535) {
     throw "Port must be between 1 and 65535."
+}
+
+if ([string]::IsNullOrWhiteSpace($ProfileDir)) {
+    $ProfileDir = Get-DotEnvValue -Name "BROWSER_PROFILE_DIR" -Path $envPath
+}
+if ([string]::IsNullOrWhiteSpace($ProfileDir)) {
+    $ProfileDir = "profiles\chrome"
+}
+if (-not [IO.Path]::IsPathRooted($ProfileDir)) {
+    $ProfileDir = Join-Path $repoRoot $ProfileDir
+}
+
+if ([string]::IsNullOrWhiteSpace($ChromePath)) {
+    $ChromePath = Get-DotEnvValue -Name "BROWSER_CHROME_PATH" -Path $envPath
 }
 
 function Get-ChromePath {
@@ -22,35 +71,27 @@ function Get-ChromePath {
         throw "Chrome executable not found at: $Override"
     }
 
-    foreach ($candidate in @(
-        (Join-Path $env:PROGRAMFILES "Google\Chrome\Application\chrome.exe"),
-        (Join-Path ${env:PROGRAMFILES(X86)} "Google\Chrome\Application\chrome.exe"),
-        (Join-Path $env:LOCALAPPDATA "Google\Chrome\Application\chrome.exe")
-    )) {
-        if (-not [string]::IsNullOrWhiteSpace($candidate) -and (Test-Path -LiteralPath $candidate -PathType Leaf)) {
+    foreach ($root in @($env:PROGRAMFILES, ${env:PROGRAMFILES(X86)}, $env:LOCALAPPDATA)) {
+        if ([string]::IsNullOrWhiteSpace($root)) { continue }
+        $candidate = Join-Path $root "Google\Chrome\Application\chrome.exe"
+        if (Test-Path -LiteralPath $candidate -PathType Leaf) {
             return $candidate
         }
     }
 
-    throw "Google Chrome was not found. Pass -ChromePath explicitly."
-}
-
-if ([string]::IsNullOrWhiteSpace($ProfileDir)) {
-    $ProfileDir = Join-Path $repoRoot "profiles\chrome"
-}
-elseif (-not [IO.Path]::IsPathRooted($ProfileDir)) {
-    $ProfileDir = Join-Path $repoRoot $ProfileDir
+    throw "Google Chrome was not found. Set BROWSER_CHROME_PATH in .env or pass -ChromePath explicitly."
 }
 
 New-Item -ItemType Directory -Force -Path $ProfileDir | Out-Null
 $ProfileDir = (Resolve-Path -LiteralPath $ProfileDir).Path
 $ChromePath = Get-ChromePath -Override $ChromePath
 
-$endpoint = "http://127.0.0.1:$Port/json/version"
+$cdpOrigin = "http://127.0.0.1:$Port"
+$endpoint = "$cdpOrigin/json/version"
 try {
     $existing = Invoke-WebRequest -UseBasicParsing -Uri $endpoint -TimeoutSec 1
     if ($existing.StatusCode -eq 200) {
-        Write-Output "A debuggable Chrome is already available at http://127.0.0.1:$Port"
+        Write-Output "A debuggable Chrome is already available at $cdpOrigin"
         exit 0
     }
 }
@@ -88,9 +129,9 @@ for ($i = 0; $i -lt 30; $i++) {
 }
 
 if (-not $ready) {
-    throw "Chrome started, but DevTools did not become ready at http://127.0.0.1:$Port"
+    throw "Chrome started, but DevTools did not become ready at $cdpOrigin"
 }
 
-Write-Output "Chrome ready: http://127.0.0.1:$Port"
+Write-Output "Chrome ready: $cdpOrigin"
 Write-Output "Profile: $ProfileDir"
 Write-Output "Log in manually, then call browser_start from China Apps MCP to attach."
