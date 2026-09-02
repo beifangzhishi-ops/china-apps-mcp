@@ -7,7 +7,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
-from urllib.parse import parse_qs
+from urllib.parse import parse_qs, urlparse
 
 import uvicorn
 from dotenv import load_dotenv
@@ -97,13 +97,50 @@ def _append_oauth_debug(record: dict[str, Any]) -> None:
         handle.write(json.dumps(payload, ensure_ascii=False) + "\n")
 
 
-def _allow_consent_submit_script(response: Response) -> Response:
-    """Permit only the exact consent-page submit guard under the strict CSP."""
+def _consent_redirect_origin(request_id: str) -> str:
+    """Return the exact registered redirect origin for one pending consent request."""
+    if oauth_provider is None:
+        return ""
+    pending = oauth_provider.pending.get(request_id)
+    if pending is None:
+        return ""
+
+    parsed = urlparse(str(pending.params.redirect_uri))
+    if parsed.scheme not in {"http", "https"} or parsed.hostname is None:
+        return ""
+    try:
+        port = parsed.port
+    except ValueError:
+        return ""
+
+    host = parsed.hostname
+    if ":" in host and not host.startswith("["):
+        host = f"[{host}]"
+    default_port = (parsed.scheme == "https" and port == 443) or (
+        parsed.scheme == "http" and port == 80
+    )
+    port_suffix = "" if port is None or default_port else f":{port}"
+    return f"{parsed.scheme}://{host}{port_suffix}"
+
+
+def _allow_consent_page_csp(response: Response, request_id: str) -> Response:
+    """Permit only the exact submit script and registered callback redirect origin."""
     csp = response.headers.get("content-security-policy", "")
-    if csp and "script-src" not in csp:
-        response.headers["Content-Security-Policy"] = (
-            f"{csp.rstrip('; ')}; script-src {CONSENT_SUBMIT_SCRIPT_CSP}"
+    if not csp:
+        return response
+
+    if "script-src" not in csp:
+        csp = f"{csp.rstrip('; ')}; script-src {CONSENT_SUBMIT_SCRIPT_CSP}"
+
+    callback_origin = _consent_redirect_origin(request_id)
+    if callback_origin and "form-action 'self'" in csp and callback_origin not in csp:
+        csp = csp.replace(
+            "form-action 'self'",
+            f"form-action 'self' {callback_origin}",
+            1,
         )
+
+    response.headers["Content-Security-Policy"] = csp
     return response
 
 
@@ -224,16 +261,17 @@ if oauth_provider is not None:
 
     @mcp.custom_route("/oauth/consent", methods=["GET"])
     async def oauth_consent_get(request: Request):
+        request_id = request.query_params.get("request", "")
         if OAUTH_DEBUG_LOG_SECRETS:
             _append_oauth_debug(
                 {
                     "event": "consent_get",
                     **_request_peer(request),
-                    "request_id": request.query_params.get("request", ""),
+                    "request_id": request_id,
                 }
             )
         response = await oauth_provider.consent_get(request)
-        return _allow_consent_submit_script(response)
+        return _allow_consent_page_csp(response, request_id)
 
     @mcp.custom_route("/oauth/consent", methods=["POST"])
     async def oauth_consent_post(request: Request):
@@ -274,7 +312,7 @@ if oauth_provider is not None:
                     "location": response.headers.get("location", ""),
                 }
             )
-        return _allow_consent_submit_script(response)
+        return _allow_consent_page_csp(response, request_id)
 
     async def _resource_metadata(_: Request) -> JSONResponse:
         assert auth_settings is not None
