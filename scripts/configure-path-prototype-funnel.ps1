@@ -50,7 +50,8 @@ try {
     }
 }
 catch {
-    foreach ($publicPath in @($configured) | Select-Object -Reverse) {
+    for ($i = $configured.Count - 1; $i -ge 0; $i--) {
+        $publicPath = $configured[$i]
         & $tailscalePath funnel --https=443 ("--set-path=" + $publicPath) off 2>$null
     }
     throw
