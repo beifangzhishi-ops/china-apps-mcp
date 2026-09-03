@@ -54,6 +54,10 @@ Browser tools are read-oriented. There is no generic JavaScript execution, form 
 - PowerShell 5.1+ or PowerShell 7
 - Tailscale Funnel for remote ChatGPT MCP access
 
+## 项目协作规则
+
+对项目进行修改后，必须提交相关改动并推送到远端仓库。
+
 ## Quick start
 
 ```powershell
@@ -133,8 +137,10 @@ MCP_AUTH_MODE=oauth
 For the current Funnel host:
 
 ```powershell
-.\scripts\enable-oauth.ps1 -PublicBaseUrl https://your-node.your-tailnet.ts.net
+.\scripts\enable-oauth.ps1 -PublicBaseUrl https://your-node.your-tailnet.ts.net:8443
 ```
+
+CAM 使用专用 HTTPS `8443` 端口；配置 Funnel 后，公网基地址和 OAuth MCP 地址都应包含 `:8443`。
 
 Then restart the gateway and configure Funnel:
 
@@ -145,7 +151,7 @@ Then restart the gateway and configure Funnel:
 The ChatGPT MCP server URL is:
 
 ```text
-https://your-node.your-tailnet.ts.net/mcp
+https://your-node.your-tailnet.ts.net:8443/mcp
 ```
 
 The OAuth approval secret is local-only. Do not paste `MCP_OAUTH_APPROVAL_SECRET`, `MCP_ACCESS_TOKEN`, OAuth tokens, cookies, or browser credentials into chat.
