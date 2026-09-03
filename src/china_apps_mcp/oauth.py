@@ -392,6 +392,9 @@ class LocalOAuthProvider(
         redirect_host = html.escape(urlparse(str(pending.params.redirect_uri)).netloc)
         scope_text = html.escape(" ".join(pending.params.scopes or self.scopes))
         error_html = f'<p class="error">{html.escape(error)}</p>' if error else ""
+        base_path = urlparse(self.public_base_url).path.rstrip("/")
+        consent_action = f"{base_path}/oauth/consent" if base_path else "/oauth/consent"
+        consent_action = html.escape(consent_action, quote=True)
         body = f"""<!doctype html>
 <html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>China Apps MCP authorization</title>
@@ -404,7 +407,7 @@ button{{padding:10px 16px;margin-right:8px}} .error{{color:#b00020}} code{{word-
 <p><strong>{client_name}</strong> is requesting access to this personal MCP gateway.</p>
 <p>Scope: <code>{scope_text}</code><br>Redirect host: <code>{redirect_host}</code></p>
 {error_html}
-<form method="post" action="/oauth/consent">
+<form method="post" action="{consent_action}">
 <input type="hidden" name="request" value="{html.escape(request_id, quote=True)}">
 <label>Gateway approval secret</label>
 <input type="password" name="secret" autocomplete="current-password" required autofocus>
