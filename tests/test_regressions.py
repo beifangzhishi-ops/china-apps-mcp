@@ -108,6 +108,39 @@ class OAuthProviderRegressionTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("default-src 'none'", response.headers.get("content-security-policy", ""))
         self.assertEqual(response.headers.get("referrer-policy"), "no-referrer")
         self.assertEqual(response.headers.get("x-content-type-options"), "nosniff")
+        self.assertIn('action="/oauth/consent"', response.body.decode("utf-8"))
+
+    async def test_consent_form_stays_under_public_path_prefix(self) -> None:
+        provider = LocalOAuthProvider(
+            public_base_url="https://gateway.example/cam",
+            approval_secret="correct-secret-1234",
+            state_file=Path(self.tmp.name) / "oauth-state-path.json",
+            scopes=["mcp"],
+        )
+        provider.pending["request-path"] = PendingAuthorization(
+            client_id="client-1",
+            params=self._params(resource="https://gateway.example/cam/mcp"),
+            created_at=time.time(),
+        )
+        request = Request(
+            {
+                "type": "http",
+                "http_version": "1.1",
+                "method": "GET",
+                "scheme": "http",
+                "path": "/oauth/consent",
+                "raw_path": b"/oauth/consent",
+                "query_string": b"request=request-path",
+                "headers": [],
+                "client": ("127.0.0.1", 1),
+                "server": ("127.0.0.1", 8765),
+            }
+        )
+
+        response = await provider.consent_get(request)
+        body = response.body.decode("utf-8")
+        self.assertIn('action="/cam/oauth/consent"', body)
+        self.assertNotIn('action="/oauth/consent"', body)
 
     async def test_unicode_wrong_secret_is_normal_mismatch(self) -> None:
         self.provider.pending["request-2"] = self._pending()
