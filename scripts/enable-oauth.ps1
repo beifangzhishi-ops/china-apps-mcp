@@ -16,7 +16,7 @@ try {
     $uri = [Uri]$PublicBaseUrl
 }
 catch {
-    throw "PublicBaseUrl must be a valid URL, for example https://node.tailnet.ts.net"
+    throw "PublicBaseUrl must be a valid URL, for example https://node.tailnet.ts.net or https://node.tailnet.ts.net/cam"
 }
 
 if ($uri.Scheme -ne "https") {
@@ -25,14 +25,19 @@ if ($uri.Scheme -ne "https") {
 if ([string]::IsNullOrWhiteSpace($uri.Host)) {
     throw "PublicBaseUrl must include a hostname."
 }
-if (($uri.AbsolutePath -ne "/") -or (-not [string]::IsNullOrWhiteSpace($uri.Query)) -or (-not [string]::IsNullOrWhiteSpace($uri.Fragment))) {
-    throw "PublicBaseUrl must be only the HTTPS origin, with no path, query, or fragment."
+if (-not [string]::IsNullOrWhiteSpace($uri.Query) -or -not [string]::IsNullOrWhiteSpace($uri.Fragment)) {
+    throw "PublicBaseUrl must not include a query or fragment."
 }
 
-$normalizedBase = "https://" + $uri.Host
-if (-not $uri.IsDefaultPort) {
-    $normalizedBase += ":" + $uri.Port
+$normalizedPath = $uri.AbsolutePath.TrimEnd('/')
+if ([string]::IsNullOrWhiteSpace($normalizedPath)) {
+    $normalizedPath = ""
 }
+elseif ($normalizedPath -ne "/cam") {
+    throw "CAM PublicBaseUrl path must be either empty or exactly /cam."
+}
+
+$normalizedBase = $uri.GetLeftPart([UriPartial]::Authority).TrimEnd('/') + $normalizedPath
 
 $lines = [System.Collections.Generic.List[string]]::new()
 foreach ($line in [IO.File]::ReadAllLines($envPath)) {
