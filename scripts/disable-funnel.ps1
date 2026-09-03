@@ -14,16 +14,16 @@ if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administra
     throw "Run this script from an elevated PowerShell window."
 }
 
-# Remove only the routes owned by china-apps-mcp. Do not reset Funnel because
-# the same HTTPS listener may also host CPA /v1 or other services.
-& $tailscalePath funnel --https=443 --set-path=/mcp off
+# CAM owns only HTTPS 8443 after the port split. Never reset Funnel and never
+# touch CPA's HTTPS 443 routes or BMG's future HTTPS 10000 listener here.
+& $tailscalePath funnel --https=8443 --set-path=/mcp off
 if ($LASTEXITCODE -ne 0) {
-    throw "Failed to disable the /mcp Funnel mapping."
+    throw "Failed to disable CAM /mcp on HTTPS 8443. Other Funnel listeners were not modified."
 }
 
-& $tailscalePath funnel --https=443 --set-path=/ off
+& $tailscalePath funnel --https=8443 --set-path=/ off
 if ($LASTEXITCODE -ne 0) {
-    throw "Failed to disable the root Funnel mapping."
+    throw "Failed to disable CAM root mapping on HTTPS 8443. Other Funnel listeners were not modified."
 }
 
-Write-Output "China Apps MCP Funnel routes are disabled. Other path-specific routes were left unchanged."
+Write-Output "CAM HTTPS 8443 Funnel routes are disabled. HTTPS 443 and 10000 were not modified."
