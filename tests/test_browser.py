@@ -89,6 +89,11 @@ class _FakeWebSocket:
         self.release.set()
 
 
+async def _wait_until_connected(bridge: BrowserBridge) -> None:
+    while not bridge.connected:
+        await asyncio.sleep(0)
+
+
 class EdgeBridgeHandshakeTests(unittest.IsolatedAsyncioTestCase):
     async def test_non_hello_socket_never_becomes_extension_connection(self) -> None:
         bridge = BrowserBridge()
@@ -108,7 +113,10 @@ class EdgeBridgeHandshakeTests(unittest.IsolatedAsyncioTestCase):
         task = asyncio.create_task(
             bridge._handle_connection(websocket)  # type: ignore[arg-type]
         )
-        await asyncio.sleep(0)
+        try:
+            await asyncio.wait_for(_wait_until_connected(bridge), timeout=1.0)
+        except asyncio.TimeoutError:
+            self.fail("bridge.connected did not become True within 1.0 seconds")
 
         self.assertTrue(bridge.connected)
         self.assertEqual(
