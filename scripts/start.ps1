@@ -100,6 +100,45 @@ function Get-LoopbackListenerPid {
     return $null
 }
 
+function Test-CamHealth {
+    param([Parameter(Mandatory = $true)][int]$Port)
+
+    try {
+        $response = Invoke-WebRequest -UseBasicParsing -Uri "http://127.0.0.1:$Port/health" -TimeoutSec 2
+        if ($response.StatusCode -ne 200) {
+            return $false
+        }
+
+        $payload = $response.Content | ConvertFrom-Json
+        return (
+            $payload.ok -eq $true -and
+            $payload.service -eq "china-apps-mcp" -and
+            $payload.mcp_path -eq "/mcp"
+        )
+    }
+    catch {
+        return $false
+    }
+}
+
+function Get-OptionalProcessIdentity {
+    param([Parameter(Mandatory = $true)][int]$ProcessId)
+
+    $cim = Get-CimInstance Win32_Process -Filter "ProcessId = $ProcessId" -ErrorAction SilentlyContinue
+    if ($null -eq $cim) {
+        return "unknown"
+    }
+
+    $commandLine = [string]$cim.CommandLine
+    if ([string]::IsNullOrWhiteSpace($commandLine)) {
+        return "unknown"
+    }
+    if ($commandLine -match "china_apps_mcp") {
+        return "valid"
+    }
+    return "invalid"
+}
+
 function Normalize-LoopbackProxy {
     foreach ($name in @("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY")) {
         $value = [Environment]::GetEnvironmentVariable($name, "Process")
@@ -163,14 +202,27 @@ if (-not $Background) {
 New-Item -ItemType Directory -Force -Path $stateDir | Out-Null
 New-Item -ItemType Directory -Force -Path $logsDir | Out-Null
 
-# Refuse to launch a second process onto the configured port. If the existing
-# listener is this gateway, repair the PID file and report it as already running.
+# Refuse to launch a second process onto the configured port. Only an exact
+# PID-file/listener match with a healthy CAM may be reported as already running.
 $existingPid = Get-LoopbackListenerPid -Port $port
 
 if ($null -ne $existingPid) {
     $existingPid = [int]$existingPid
-    $existingCim = Get-CimInstance Win32_Process -Filter "ProcessId = $existingPid" -ErrorAction SilentlyContinue
-    if ($null -ne $existingCim -and $existingCim.CommandLine -and $existingCim.CommandLine -match "china_apps_mcp") {
+    $pidFilePid = 0
+    $pidFileMatches = $false
+    if (Test-Path -LiteralPath $pidFile -PathType Leaf) {
+        $pidFileText = (Get-Content -LiteralPath $pidFile -Raw).Trim()
+        if ([int]::TryParse($pidFileText, [ref]$pidFilePid) -and $pidFilePid -gt 0 -and $pidFilePid -eq $existingPid) {
+            $pidFileMatches = $true
+        }
+    }
+
+    if ($pidFileMatches -and (Test-CamHealth -Port $port)) {
+        $identity = Get-OptionalProcessIdentity -ProcessId $existingPid
+        if ($identity -eq "invalid") {
+            throw "Port $port is held by a process whose available identity is not china_apps_mcp."
+        }
+
         Set-Content -LiteralPath $pidFile -Value ([string]$existingPid) -Encoding ASCII
         Write-Output "China Apps MCP is already running. PID=$existingPid"
         Write-Output "Health: $healthUrl"
@@ -198,16 +250,9 @@ $healthy = $false
 for ($i = 0; $i -lt 30; $i++) {
     Start-Sleep -Milliseconds 500
 
-    try {
-        $response = Invoke-WebRequest -UseBasicParsing -Uri $healthUrl -TimeoutSec 2
-        if ($response.StatusCode -eq 200) {
-            $healthy = $true
-            break
-        }
-    }
-    catch {
-        # Keep waiting. The venv launcher PID may exit after spawning the real
-        # interpreter, so health/listener state is authoritative here.
+    if (Test-CamHealth -Port $port) {
+        $healthy = $true
+        break
     }
 }
 
@@ -239,12 +284,19 @@ if ($null -eq $listenerPid) {
 }
 
 $listenerPid = [int]$listenerPid
-$listenerCim = Get-CimInstance Win32_Process -Filter "ProcessId = $listenerPid" -ErrorAction SilentlyContinue
-if ($null -eq $listenerCim -or -not $listenerCim.CommandLine -or $listenerCim.CommandLine -notmatch "china_apps_mcp") {
+$listenerIdentity = Get-OptionalProcessIdentity -ProcessId $listenerPid
+if ($listenerIdentity -eq "invalid") {
     if (-not $process.HasExited) {
         Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
     }
-    throw "The listener on port $port is not a verified china_apps_mcp process."
+    if ($process.Id -ne $listenerPid) {
+        $listenerProcess = Get-Process -Id $listenerPid -ErrorAction SilentlyContinue
+        if ($null -ne $listenerProcess) {
+            Stop-Process -Id $listenerPid -Force -ErrorAction SilentlyContinue
+        }
+    }
+    Remove-Item -LiteralPath $pidFile -Force -ErrorAction SilentlyContinue
+    throw "The listener on port $port has an available identity that is not china_apps_mcp."
 }
 
 Set-Content -LiteralPath $pidFile -Value ([string]$listenerPid) -Encoding ASCII

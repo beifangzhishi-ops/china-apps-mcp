@@ -73,6 +73,8 @@ Double-click:
 
 The launcher creates/updates `.venv`, installs the project, starts the gateway in the background, and waits for `/health`.
 
+生命周期脚本只管理正式 CAM 的精确进程：`scripts\stop.ps1` 要求 `.state\mcp.pid`、MCP_PORT 的 loopback listener PID 和 CAM `/health` 同时匹配后才会停止该 PID；Win32 `CommandLine` 只能作为可获得时的额外校验。`scripts\start.ps1` 只有在 PID file 精确匹配 listener 且 health 确认为 CAM 时才会复用已占用端口，未知 listener 不会被自动认领。
+
 To stop the gateway:
 
 ```text

@@ -317,9 +317,16 @@ class FunnelOwnershipRegressionTests(unittest.TestCase):
 
 
 class LauncherRegressionTests(unittest.TestCase):
-    def test_start_script_uses_configured_port_and_preflight_listener_check(self) -> None:
+    def _script(self, name: str) -> str:
         repo_root = Path(__file__).resolve().parents[1]
-        text = (repo_root / "scripts" / "start.ps1").read_text(encoding="utf-8")
+        return (repo_root / "scripts" / name).read_text(encoding="utf-8")
+
+    @staticmethod
+    def _normalized(text: str) -> str:
+        return re.sub(r"\s+", " ", text)
+
+    def test_start_script_uses_configured_port_and_preflight_listener_check(self) -> None:
+        text = self._script("start.ps1")
         self.assertIn("Get-McpPort", text)
         self.assertIn("Get-LoopbackListenerPid", text)
         self.assertIn("netstat.exe", text)
@@ -328,10 +335,61 @@ class LauncherRegressionTests(unittest.TestCase):
         self.assertIn('Set-Content -LiteralPath $pidFile -Value ([string]$listenerPid)', text)
 
     def test_stop_script_has_restricted_shell_listener_fallback(self) -> None:
-        repo_root = Path(__file__).resolve().parents[1]
-        text = (repo_root / "scripts" / "stop.ps1").read_text(encoding="utf-8")
+        text = self._script("stop.ps1")
         self.assertIn("Get-LoopbackListenerPid", text)
         self.assertIn("netstat.exe", text)
+
+    def test_stop_requires_exact_listener_and_cam_health_before_stopping(self) -> None:
+        text = self._script("stop.ps1")
+        normalized = self._normalized(text)
+
+        self.assertIn("Get-Process -Id $targetPid", text)
+        self.assertRegex(
+            normalized,
+            r"Get-LoopbackListenerPid -Port \$port.*\$listenerPid -ne \$targetPid",
+        )
+        self.assertRegex(normalized, r"Test-CamHealth -Port \$port")
+        self.assertIn('service -eq "china-apps-mcp"', text)
+        self.assertIn('mcp_path -eq "/mcp"', text)
+
+        stop_calls = re.findall(r"(?im)^\s*Stop-Process\s+([^\r\n]+)", text)
+        self.assertEqual(len(stop_calls), 1)
+        self.assertRegex(stop_calls[0], r"-Id\s+\$targetPid\b")
+
+    def test_process_identity_is_optional_but_explicit_mismatch_is_rejected(self) -> None:
+        for name in ("stop.ps1", "start.ps1"):
+            text = self._script(name)
+            normalized = self._normalized(text)
+            self.assertIn("Get-OptionalProcessIdentity", text)
+            self.assertIn('return "unknown"', text)
+            self.assertIn('return "invalid"', text)
+            self.assertRegex(normalized, r'\$identity -eq "invalid"')
+            self.assertNotRegex(
+                normalized,
+                r"\$null -eq \$\w+Cim -or -not \$\w+Cim\.CommandLine",
+            )
+
+    def test_start_never_claims_unknown_listener_without_pid_file_match_and_health(self) -> None:
+        text = self._script("start.ps1")
+        normalized = self._normalized(text)
+
+        self.assertIn("$pidFileMatches", text)
+        self.assertIn("[int]::TryParse($pidFileText", text)
+        self.assertRegex(
+            normalized,
+            r"\$pidFileMatches -and \(Test-CamHealth -Port \$port\)",
+        )
+        self.assertIn("Port $port is already in use", text)
+
+    def test_lifecycle_scripts_have_no_broad_process_kill(self) -> None:
+        for name in ("stop.ps1", "start.ps1"):
+            text = self._script(name)
+            self.assertNotRegex(text, r"(?im)\btaskkill\s+/im\b")
+            self.assertNotRegex(text, r"(?im)Stop-Process\s+-Name\b")
+            self.assertNotRegex(
+                text,
+                r"(?im)Stop-Process[^\r\n]*(?:python|node)(?:\.exe)?",
+            )
 
 
 if __name__ == "__main__":

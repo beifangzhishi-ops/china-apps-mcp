@@ -44,6 +44,45 @@ function Get-LoopbackListenerPid {
     return $null
 }
 
+function Test-CamHealth {
+    param([Parameter(Mandatory = $true)][int]$Port)
+
+    try {
+        $response = Invoke-WebRequest -UseBasicParsing -Uri "http://127.0.0.1:$Port/health" -TimeoutSec 2
+        if ($response.StatusCode -ne 200) {
+            return $false
+        }
+
+        $payload = $response.Content | ConvertFrom-Json
+        return (
+            $payload.ok -eq $true -and
+            $payload.service -eq "china-apps-mcp" -and
+            $payload.mcp_path -eq "/mcp"
+        )
+    }
+    catch {
+        return $false
+    }
+}
+
+function Get-OptionalProcessIdentity {
+    param([Parameter(Mandatory = $true)][int]$ProcessId)
+
+    $cim = Get-CimInstance Win32_Process -Filter "ProcessId = $ProcessId" -ErrorAction SilentlyContinue
+    if ($null -eq $cim) {
+        return "unknown"
+    }
+
+    $commandLine = [string]$cim.CommandLine
+    if ([string]::IsNullOrWhiteSpace($commandLine)) {
+        return "unknown"
+    }
+    if ($commandLine -match "china_apps_mcp") {
+        return "valid"
+    }
+    return "invalid"
+}
+
 if (-not (Test-Path -LiteralPath $pidFile)) {
     Write-Output "China Apps MCP is not running (PID file not found)."
     exit 0
@@ -62,15 +101,19 @@ if ($null -eq $process) {
     exit 0
 }
 
-$cim = Get-CimInstance Win32_Process -Filter "ProcessId = $targetPid" -ErrorAction SilentlyContinue
-if ($null -eq $cim -or -not $cim.CommandLine -or $cim.CommandLine -notmatch "china_apps_mcp") {
-    throw "Refusing to stop PID $targetPid because it is not a verified china_apps_mcp process."
-}
-
 $listenerPid = Get-LoopbackListenerPid -Port $port
 
 if ($null -eq $listenerPid -or [int]$listenerPid -ne $targetPid) {
     throw "Refusing to stop PID $targetPid because it is not the loopback listener on MCP_PORT=$port."
+}
+
+if (-not (Test-CamHealth -Port $port)) {
+    throw "Refusing to stop PID $targetPid because the CAM health check failed on MCP_PORT=$port."
+}
+
+$identity = Get-OptionalProcessIdentity -ProcessId $targetPid
+if ($identity -eq "invalid") {
+    throw "Refusing to stop PID $targetPid because its available process identity is not china_apps_mcp."
 }
 
 Stop-Process -Id $targetPid -Force
