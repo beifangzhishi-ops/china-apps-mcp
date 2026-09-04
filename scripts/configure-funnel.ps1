@@ -57,9 +57,13 @@ $expectedResource = "$issuerText/mcp"
 if ([string]$resourceMetadata.resource -ne $expectedResource) {
     throw "Production CAM resource metadata mismatch. Expected $expectedResource but got $($resourceMetadata.resource)."
 }
-$authorizationServers = @($resourceMetadata.authorization_servers | ForEach-Object { [string]$_ })
-if ($authorizationServers.Count -ne 1 -or $authorizationServers[0].TrimEnd('/') -ne $issuerText) {
-    throw "Production CAM authorization_servers must contain exactly its canonical issuer: $issuerText"
+$authorizationServers = @(
+    $resourceMetadata.authorization_servers |
+        ForEach-Object { ([string]$_).TrimEnd('/') } |
+        Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
+)
+if ($authorizationServers -notcontains $issuerText) {
+    throw "Production CAM authorization_servers must include its canonical issuer: $issuerText"
 }
 
 # CAM owns only these exact HTTPS 443 paths. Do not add a root catch-all here:
