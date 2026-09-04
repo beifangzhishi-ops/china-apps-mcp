@@ -5,8 +5,6 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
-$repoRoot = Split-Path -Parent $PSScriptRoot
-$envPath = Join-Path $repoRoot ".env"
 $tailscalePath = Join-Path $env:ProgramFiles "Tailscale\tailscale.exe"
 if (-not (Test-Path -LiteralPath $tailscalePath)) {
     $tailscale = Get-Command tailscale.exe -ErrorAction Stop
@@ -21,39 +19,31 @@ if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administra
 if (-not $ConfirmLegacyCamRemoval) {
     throw "Refusing to remove legacy CAM routes without -ConfirmLegacyCamRemoval. Run this only after the production /cam connector and browser tools are verified."
 }
-if (-not (Test-Path -LiteralPath $envPath)) {
-    throw "Missing .env. Refusing legacy cleanup without verifying the production CAM identity."
-}
 
-$publicBase = ""
-foreach ($line in [IO.File]::ReadAllLines($envPath)) {
-    if ($line -match '^\s*MCP_PUBLIC_BASE_URL\s*=\s*(.+?)\s*$') {
-        $publicBase = $matches[1].Trim().TrimEnd('/')
-        break
-    }
-}
-if ([string]::IsNullOrWhiteSpace($publicBase)) {
-    throw "MCP_PUBLIC_BASE_URL is missing from .env."
-}
-
-try { $publicUri = [Uri]$publicBase } catch { throw "MCP_PUBLIC_BASE_URL is not a valid URL: $publicBase" }
-if ($publicUri.Scheme -ne "https" -or $publicUri.AbsolutePath.TrimEnd('/') -ne "/cam" -or -not $publicUri.IsDefaultPort -or $publicUri.Query -or $publicUri.Fragment) {
-    throw "Legacy cleanup requires the production public base to be exactly an HTTPS 443 /cam issuer. Current value: $publicBase"
-}
-
-# Verify the running 8765 process has actually loaded the /cam identity. Editing
-# .env without restarting production CAM is not enough to permit cleanup.
+# Trust the running production process as the source of truth. A .env file can be
+# stale or edited without restart, so it must not authorize destructive cleanup.
 $authMetadataUrl = "http://127.0.0.1:$Port/.well-known/oauth-authorization-server"
 try {
     $authMetadata = Invoke-RestMethod -Uri $authMetadataUrl -TimeoutSec 5
     $runningIssuer = ([string]$authMetadata.issuer).TrimEnd('/')
+    $runningIssuerUri = [Uri]$runningIssuer
 }
 catch {
     throw "Could not verify the running production CAM issuer at $authMetadataUrl."
 }
-if ($runningIssuer -ne $publicBase) {
-    throw "Running production CAM issuer does not match .env. Expected $publicBase but got $runningIssuer."
+
+if (
+    $runningIssuerUri.Scheme -ne "https" -or
+    [string]::IsNullOrWhiteSpace($runningIssuerUri.Host) -or
+    -not $runningIssuerUri.IsDefaultPort -or
+    $runningIssuerUri.AbsolutePath.TrimEnd('/') -ne "/cam" -or
+    $runningIssuerUri.Query -or
+    $runningIssuerUri.Fragment
+) {
+    throw "Legacy cleanup requires the running production CAM issuer to be exactly an HTTPS 443 /cam identity. Current issuer: $runningIssuer"
 }
+
+$publicBase = $runningIssuer
 
 # Verify the new public path is healthy before removing any rollback route.
 $publicHealthUrl = "$publicBase/health"
