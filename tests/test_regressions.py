@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+import re
 import tempfile
 import time
 import unittest
@@ -11,7 +13,7 @@ from mcp.server.auth.provider import AccessToken, AuthorizeError
 from starlette.requests import Request
 
 from china_apps_mcp.oauth import LocalOAuthProvider, PendingAuthorization
-from china_apps_mcp.server import _constant_time_text_equal
+from china_apps_mcp.server import _consent_debug_fields, _constant_time_text_equal
 
 
 def _post_request(fields: dict[str, str]) -> Request:
@@ -226,10 +228,92 @@ class OAuthProviderRegressionTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn(refresh_value, self.provider.token_grants)
 
 
+class OAuthDebugRegressionTests(unittest.TestCase):
+    def test_consent_debug_fields_never_include_secret_values_or_raw_body(self) -> None:
+        secret = "diagnostic-secret-value-1234"
+        body = urlencode(
+            {
+                "request": "request-debug-1",
+                "secret": secret,
+                "action": "approve",
+            }
+        ).encode("utf-8")
+
+        record = _consent_debug_fields(body, secret)
+        serialized = json.dumps(record, ensure_ascii=False)
+
+        self.assertTrue(record["secret_match"])
+        self.assertEqual(record["submitted_secret_length"], len(secret))
+        self.assertEqual(record["expected_secret_length"], len(secret))
+        self.assertNotIn(secret, serialized)
+        self.assertNotIn("raw_body", record)
+        self.assertNotIn("submitted_secret", record)
+        self.assertNotIn("expected_secret", record)
+
+
 class BearerRegressionTests(unittest.TestCase):
     def test_unicode_bearer_input_does_not_raise(self) -> None:
         self.assertFalse(_constant_time_text_equal("é错误", "ascii-token"))
         self.assertTrue(_constant_time_text_equal("same-令牌", "same-令牌"))
+
+
+class FunnelOwnershipRegressionTests(unittest.TestCase):
+    CAM_PATHS = {
+        "/cam/mcp",
+        "/cam/authorize",
+        "/cam/token",
+        "/cam/register",
+        "/cam/revoke",
+        "/cam/oauth/consent",
+        "/cam/health",
+        "/.well-known/oauth-authorization-server/cam",
+        "/cam/.well-known/oauth-authorization-server",
+        "/.well-known/oauth-protected-resource/cam/mcp",
+        "/cam/mcp/.well-known/oauth-protected-resource",
+    }
+
+    def setUp(self) -> None:
+        self.repo_root = Path(__file__).resolve().parents[1]
+
+    def _script(self, name: str) -> str:
+        return (self.repo_root / "scripts" / name).read_text(encoding="utf-8")
+
+    def test_production_configure_owns_only_exact_cam_paths(self) -> None:
+        text = self._script("configure-funnel.ps1")
+        configured = set(re.findall(r'Public\s*=\s*"([^"]+)"', text))
+        self.assertEqual(configured, self.CAM_PATHS)
+        self.assertIn('AbsolutePath.TrimEnd(\'/\') -ne "/cam"', text)
+        self.assertNotIn("funnel reset", text.lower())
+        self.assertNotIn("--set-path=/v1", text)
+        self.assertNotIn("--https=443 off", text)
+
+    def test_production_disable_removes_only_exact_cam_paths(self) -> None:
+        text = self._script("disable-funnel.ps1")
+        disabled = set(
+            re.findall(r'^\s*"(/[^\"]+)"[,]?\s*$', text, flags=re.MULTILINE)
+        )
+        self.assertEqual(disabled, self.CAM_PATHS)
+        self.assertNotIn("funnel reset", text.lower())
+        self.assertNotIn("--set-path=/v1", text)
+        self.assertNotIn("--https=443 off", text)
+
+    def test_legacy_cleanup_is_explicit_and_limited_to_historical_cam_routes(self) -> None:
+        text = self._script("remove-legacy-cam-funnel.ps1")
+        self.assertIn("ConfirmLegacyCamRemoval", text)
+        routes = {
+            (int(port), path)
+            for port, path in re.findall(
+                r'@\{\s*Https\s*=\s*(443|8443);\s*Path\s*=\s*"(/?mcp|/)"\s*\}',
+                text,
+            )
+        }
+        self.assertEqual(
+            routes,
+            {(443, "/mcp"), (443, "/"), (8443, "/mcp"), (8443, "/")},
+        )
+        self.assertIn("$publicBase/health", text)
+        self.assertNotIn("funnel reset", text.lower())
+        self.assertNotIn("--https=443 off", text)
 
 
 class LauncherRegressionTests(unittest.TestCase):

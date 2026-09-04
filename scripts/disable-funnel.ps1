@@ -14,16 +14,33 @@ if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administra
     throw "Run this script from an elevated PowerShell window."
 }
 
-# CAM owns only HTTPS 8443 after the port split. Never reset Funnel and never
-# touch CPA's HTTPS 443 routes or BMG's future HTTPS 10000 listener here.
-& $tailscalePath funnel --https=8443 --set-path=/mcp off
-if ($LASTEXITCODE -ne 0) {
-    throw "Failed to disable CAM /mcp on HTTPS 8443. Other Funnel listeners were not modified."
+# These are the only public HTTPS 443 paths owned by production CAM.
+$paths = @(
+    "/cam/mcp/.well-known/oauth-protected-resource",
+    "/.well-known/oauth-protected-resource/cam/mcp",
+    "/cam/.well-known/oauth-authorization-server",
+    "/.well-known/oauth-authorization-server/cam",
+    "/cam/health",
+    "/cam/oauth/consent",
+    "/cam/revoke",
+    "/cam/register",
+    "/cam/token",
+    "/cam/authorize",
+    "/cam/mcp"
+)
+
+$failed = [System.Collections.Generic.List[string]]::new()
+foreach ($publicPath in $paths) {
+    & $tailscalePath funnel --https=443 ("--set-path=" + $publicPath) off
+    if ($LASTEXITCODE -ne 0) {
+        $failed.Add($publicPath)
+    }
 }
 
-& $tailscalePath funnel --https=8443 --set-path=/ off
-if ($LASTEXITCODE -ne 0) {
-    throw "Failed to disable CAM root mapping on HTTPS 8443. Other Funnel listeners were not modified."
+if ($failed.Count -gt 0) {
+    throw "Some CAM Funnel paths could not be removed: $($failed -join ', '). No listener-wide or global Funnel operation was attempted."
 }
 
-Write-Output "CAM HTTPS 8443 Funnel routes are disabled. HTTPS 443 and 10000 were not modified."
+Write-Output "Production CAM Funnel routes are disabled."
+Write-Output "Legacy / and /mcp, CPA /v1, HTTPS 8443, and other service prefixes were not modified."
+& $tailscalePath funnel status

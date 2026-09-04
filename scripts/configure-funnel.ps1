@@ -18,39 +18,77 @@ if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administra
 
 $healthUrl = "http://127.0.0.1:$Port/health"
 try {
-    $null = Invoke-WebRequest -UseBasicParsing -Uri $healthUrl -TimeoutSec 5
+    $health = Invoke-WebRequest -UseBasicParsing -Uri $healthUrl -TimeoutSec 5
+    if ($health.StatusCode -ne 200) { throw "unexpected status" }
 }
 catch {
-    throw "Local gateway health check failed at $healthUrl. Start the MCP gateway first."
+    throw "Local CAM gateway health check failed at $healthUrl. Start the production gateway first."
 }
 
-# CAM owns HTTPS 8443. During migration, the legacy CAM routes on 443 are left
-# untouched so the existing ChatGPT connection keeps working until 8443 is verified.
-& $tailscalePath funnel --bg --https=8443 --set-path=/mcp "http://127.0.0.1:$Port/mcp"
-if ($LASTEXITCODE -ne 0) {
-    throw "Failed to configure CAM /mcp on HTTPS 8443."
-}
-
-# OAuth needs /.well-known, /authorize, /token, /register, /revoke, and
-# /oauth/consent on the same HTTPS origin. The root fallback exposes those routes
-# on CAM's dedicated 8443 origin.
-& $tailscalePath funnel --bg --https=8443 --set-path=/ "http://127.0.0.1:$Port"
-if ($LASTEXITCODE -ne 0) {
-    throw "Failed to configure CAM root mapping on HTTPS 8443."
-}
-
+# Refuse to move the public /cam routes until the production process itself is
+# already advertising the canonical path-based OAuth identity. This prevents an
+# accidental cutover while 8765 still identifies the legacy root /mcp resource.
+$authMetadataUrl = "http://127.0.0.1:$Port/.well-known/oauth-authorization-server"
 try {
-    $statusJson = (& $tailscalePath status --json | ConvertFrom-Json)
-    $dnsName = ([string]$statusJson.Self.DNSName).TrimEnd('.')
-    if (-not [string]::IsNullOrWhiteSpace($dnsName)) {
-        Write-Output "CAM public base URL: https://${dnsName}:8443"
-        Write-Output "CAM OAuth MCP URL:    https://${dnsName}:8443/mcp"
-        Write-Output "For OAuth migration, set MCP_PUBLIC_BASE_URL=https://${dnsName}:8443 and include $dnsName in MCP_ALLOWED_HOSTS only after the 8443 Funnel path is verified."
-        Write-Output "Legacy CAM routes on HTTPS 443 were not modified."
-    }
+    $authMetadata = Invoke-RestMethod -Uri $authMetadataUrl -TimeoutSec 5
+    $issuerText = ([string]$authMetadata.issuer).TrimEnd('/')
+    $issuerUri = [Uri]$issuerText
 }
 catch {
-    Write-Output "Could not read the Tailscale DNS name automatically. Use 'tailscale funnel status' below."
+    throw "Could not read production CAM OAuth metadata at $authMetadataUrl. Ensure OAuth mode is enabled before configuring Funnel."
 }
 
+if ($issuerUri.Scheme -ne "https" -or [string]::IsNullOrWhiteSpace($issuerUri.Host)) {
+    throw "Production CAM issuer must be an absolute HTTPS URL. Current issuer: $issuerText"
+}
+if ($issuerUri.AbsolutePath.TrimEnd('/') -ne "/cam" -or $issuerUri.Query -or $issuerUri.Fragment) {
+    throw "Production CAM must advertise an issuer ending exactly in /cam before Funnel cutover. Current issuer: $issuerText"
+}
+
+$resourceMetadataUrl = "http://127.0.0.1:$Port/.well-known/oauth-protected-resource/mcp"
+try {
+    $resourceMetadata = Invoke-RestMethod -Uri $resourceMetadataUrl -TimeoutSec 5
+}
+catch {
+    throw "Could not read production CAM protected-resource metadata at $resourceMetadataUrl."
+}
+
+$expectedResource = "$issuerText/mcp"
+if ([string]$resourceMetadata.resource -ne $expectedResource) {
+    throw "Production CAM resource metadata mismatch. Expected $expectedResource but got $($resourceMetadata.resource)."
+}
+$authorizationServers = @($resourceMetadata.authorization_servers | ForEach-Object { [string]$_ })
+if ($authorizationServers.Count -ne 1 -or $authorizationServers[0].TrimEnd('/') -ne $issuerText) {
+    throw "Production CAM authorization_servers must contain exactly its canonical issuer: $issuerText"
+}
+
+# CAM owns only these exact HTTPS 443 paths. Do not add a root catch-all here:
+# /v1 belongs to CPA; /bmg and future service prefixes are separate ownership domains.
+$routes = @(
+    @{ Public = "/cam/mcp"; Target = "http://127.0.0.1:$Port/mcp" },
+    @{ Public = "/cam/authorize"; Target = "http://127.0.0.1:$Port/authorize" },
+    @{ Public = "/cam/token"; Target = "http://127.0.0.1:$Port/token" },
+    @{ Public = "/cam/register"; Target = "http://127.0.0.1:$Port/register" },
+    @{ Public = "/cam/revoke"; Target = "http://127.0.0.1:$Port/revoke" },
+    @{ Public = "/cam/oauth/consent"; Target = "http://127.0.0.1:$Port/oauth/consent" },
+    @{ Public = "/cam/health"; Target = "http://127.0.0.1:$Port/health" },
+    @{ Public = "/.well-known/oauth-authorization-server/cam"; Target = "http://127.0.0.1:$Port/.well-known/oauth-authorization-server" },
+    @{ Public = "/cam/.well-known/oauth-authorization-server"; Target = "http://127.0.0.1:$Port/.well-known/oauth-authorization-server" },
+    @{ Public = "/.well-known/oauth-protected-resource/cam/mcp"; Target = "http://127.0.0.1:$Port/.well-known/oauth-protected-resource/mcp" },
+    @{ Public = "/cam/mcp/.well-known/oauth-protected-resource"; Target = "http://127.0.0.1:$Port/mcp/.well-known/oauth-protected-resource" }
+)
+
+$configured = [System.Collections.Generic.List[string]]::new()
+foreach ($route in $routes) {
+    & $tailscalePath funnel --bg --https=443 ("--set-path=" + $route.Public) $route.Target
+    if ($LASTEXITCODE -ne 0) {
+        throw "Failed to configure CAM Funnel route $($route.Public). $($configured.Count) earlier CAM routes may already point to production. No automatic rollback was attempted because those paths may have had a pre-existing prototype target; inspect 'tailscale funnel status' and rerun after fixing the error."
+    }
+    $configured.Add($route.Public)
+}
+
+Write-Output "Production CAM Funnel routes now point to 127.0.0.1:$Port."
+Write-Output "CAM issuer: $issuerText"
+Write-Output "CAM MCP:    $expectedResource"
+Write-Output "Only CAM-owned HTTPS 443 paths were updated. Legacy /, /mcp and HTTPS 8443 routes were intentionally left untouched for rollback."
 & $tailscalePath funnel status

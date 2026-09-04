@@ -45,6 +45,8 @@ PUBLIC_MCP_URL = f"{PUBLIC_BASE_URL}/mcp" if PUBLIC_BASE_URL else ""
 OAUTH_APPROVAL_SECRET = os.getenv("MCP_OAUTH_APPROVAL_SECRET", "").strip()
 OAUTH_STATE_FILE = Path(os.getenv("MCP_OAUTH_STATE_FILE", ".state/oauth-state.json"))
 OAUTH_SCOPES = ["mcp"]
+# Backward-compatible environment name. Enabling this flag turns on redacted
+# OAuth diagnostics only; approval-secret values and raw POST bodies are never logged.
 OAUTH_DEBUG_LOG_SECRETS = os.getenv("MCP_OAUTH_DEBUG_LOG_SECRETS", "0").strip().lower() in {
     "1",
     "true",
@@ -95,6 +97,22 @@ def _append_oauth_debug(record: dict[str, Any]) -> None:
     }
     with OAUTH_DEBUG_LOG_FILE.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(payload, ensure_ascii=False) + "\n")
+
+
+def _consent_debug_fields(body_bytes: bytes, expected_secret: str) -> dict[str, Any]:
+    """Return consent diagnostics without retaining secret values or the raw body."""
+    body = body_bytes.decode("utf-8", errors="replace")
+    form = parse_qs(body, keep_blank_values=True)
+    submitted_secret = form.get("secret", [""])[0]
+    return {
+        "body_length": len(body_bytes),
+        "form_fields": sorted(form.keys()),
+        "request_id": form.get("request", [""])[0],
+        "action": form.get("action", [""])[0],
+        "submitted_secret_length": len(submitted_secret),
+        "expected_secret_length": len(expected_secret),
+        "secret_match": _constant_time_text_equal(submitted_secret, expected_secret),
+    }
 
 
 def _consent_redirect_origin(request_id: str) -> str:
@@ -162,30 +180,13 @@ async def _log_consent_post(request: Request) -> None:
     if not OAUTH_DEBUG_LOG_SECRETS:
         return
     body_bytes = await request.body()
-    body = body_bytes.decode("utf-8", errors="replace")
-    form = parse_qs(body, keep_blank_values=True)
-    submitted_secret = form.get("secret", [""])[0]
-    request_id = form.get("request", [""])[0]
-    action = form.get("action", [""])[0]
     _append_oauth_debug(
         {
             "event": "consent_post",
             **_request_peer(request),
             "content_type": request.headers.get("content-type", ""),
             "content_length": request.headers.get("content-length", ""),
-            "body_length": len(body_bytes),
-            "raw_body": body,
-            "form_fields": sorted(form.keys()),
-            "request_id": request_id,
-            "action": action,
-            "submitted_secret": submitted_secret,
-            "submitted_secret_length": len(submitted_secret),
-            "expected_secret": OAUTH_APPROVAL_SECRET,
-            "expected_secret_length": len(OAUTH_APPROVAL_SECRET),
-            "secret_match": _constant_time_text_equal(
-                submitted_secret,
-                OAUTH_APPROVAL_SECRET,
-            ),
+            **_consent_debug_fields(body_bytes, OAUTH_APPROVAL_SECRET),
         }
     )
 
@@ -289,7 +290,6 @@ if oauth_provider is not None:
                         **_request_peer(request),
                         "request_id": request_id,
                         "status_code": retry.status_code,
-                        "location": retry.headers.get("location", ""),
                     }
                 )
             return retry
@@ -309,7 +309,7 @@ if oauth_provider is not None:
                     **_request_peer(request),
                     "request_id": request_id,
                     "status_code": response.status_code,
-                    "location": response.headers.get("location", ""),
+                    "redirected": bool(response.headers.get("location", "")),
                 }
             )
         return _allow_consent_page_csp(response, request_id)
